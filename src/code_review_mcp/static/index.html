@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title id="page-title">Code Review</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html/bundles/css/diff2html.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/diff2html/bundles/js/diff2html-ui.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <!-- Header -->
+  <div class="header">
+    <div class="header-inner">
+      <div class="header-left">
+        <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle file tree">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 3.25a.75.75 0 000 1.5h13a.75.75 0 000-1.5h-13zM1.5 7.25a.75.75 0 000 1.5h13a.75.75 0 000-1.5h-13zM1.5 11.25a.75.75 0 000 1.5h13a.75.75 0 000-1.5h-13z"/></svg>
+        </button>
+        <h1 id="review-title">Loading...</h1>
+      </div>
+      <div class="header-right">
+        <span class="file-stats" id="file-stats"></span>
+        <div class="view-toggle">
+          <button class="view-btn active" data-view="line-by-line">Unified</button>
+          <button class="view-btn" data-view="side-by-side">Split</button>
+        </div>
+        <button class="theme-toggle" id="theme-toggle" title="Toggle theme">
+          <svg class="icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12a4 4 0 100-8 4 4 0 000 8zm0-1.5a2.5 2.5 0 110-5 2.5 2.5 0 010 5zM8 0a.75.75 0 01.75.75v1.5a.75.75 0 01-1.5 0V.75A.75.75 0 018 0zm0 13a.75.75 0 01.75.75v1.5a.75.75 0 01-1.5 0v-1.5A.75.75 0 018 13zM2.343 2.343a.75.75 0 011.061 0l1.06 1.06a.75.75 0 01-1.06 1.06l-1.06-1.06a.75.75 0 010-1.06zm9.193 9.193a.75.75 0 011.06 0l1.06 1.06a.75.75 0 01-1.06 1.06l-1.06-1.06a.75.75 0 010-1.06zM0 8a.75.75 0 01.75-.75h1.5a.75.75 0 010 1.5H.75A.75.75 0 010 8zm13 0a.75.75 0 01.75-.75h1.5a.75.75 0 010 1.5h-1.5A.75.75 0 0113 8zM2.343 13.657a.75.75 0 010-1.06l1.06-1.06a.75.75 0 011.06 1.06l-1.06 1.06a.75.75 0 01-1.06 0zm9.193-9.193a.75.75 0 010-1.06l1.06-1.06a.75.75 0 111.06 1.06l-1.06 1.06a.75.75 0 01-1.06 0z"/></svg>
+          <svg class="icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M9.598 1.591a.75.75 0 01.785-.175 7 7 0 11-8.967 8.967.75.75 0 01.961-.96 5.5 5.5 0 007.046-7.046.75.75 0 01.175-.786z"/></svg>
+        </button>
+        <span class="header-badge">Code Review</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- App layout: file tree + diff + comments -->
+  <div class="app-layout">
+    <!-- File tree sidebar -->
+    <div class="file-sidebar" id="file-sidebar">
+      <div class="file-sidebar-filter">
+        <svg class="filter-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M11.5 7a4.499 4.499 0 11-8.998 0A4.499 4.499 0 0111.5 7zm-.82 4.74a6 6 0 111.06-1.06l3.04 3.04a.75.75 0 11-1.06 1.06l-3.04-3.04z"/></svg>
+        <input type="text" class="filter-input" id="file-filter" placeholder="Filter files..." />
+      </div>
+      <div class="file-tree" id="file-tree"></div>
+    </div>
+    <div class="resize-handle" id="resize-sidebar" data-resize="sidebar"></div>
+
+    <!-- Main diff area -->
+    <div class="layout">
+      <div class="main-content" id="diff-content"></div>
+      <div class="resize-handle" id="resize-comments" data-resize="comments"></div>
+      <div class="comment-margin" id="comment-margin">
+        <div class="margin-header">Comments</div>
+        <div class="margin-list" id="comment-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <div class="footer-inner">
+      <div class="footer-textarea-wrap">
+        <div class="footer-label">
+          Overall feedback
+          <span class="pending-count" id="pending-count"></span>
+        </div>
+        <textarea class="footer-textarea" id="overall-feedback"
+          placeholder="General feedback about this diff..."></textarea>
+      </div>
+      <div class="footer-submit-wrap">
+        <button class="btn-submit" id="submit-btn">Submit Comments</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>
