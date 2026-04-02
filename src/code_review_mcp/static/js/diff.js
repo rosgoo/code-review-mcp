@@ -49,6 +49,7 @@ export async function renderDiff() {
   diff2htmlUi.draw();
   diff2htmlUi.highlightCode();
 
+  collapseContextLines();
   attachLineHandlers();
   addExpandButtons();
   updateFileStats();
@@ -252,6 +253,96 @@ function updateFileStats() {
     statsEl.appendChild(addSpan);
     statsEl.appendChild(delSpan);
   }
+}
+
+// ── Collapse long context runs between changes ─────────────────────────────
+
+const CONTEXT_PADDING = 3; // lines of context to keep visible around changes
+const MIN_COLLAPSIBLE = 4; // minimum hidden lines to bother collapsing
+
+function collapseContextLines() {
+  const fileWrappers = document.querySelectorAll(".d2h-file-wrapper");
+
+  fileWrappers.forEach(wrapper => {
+    const tbody = wrapper.querySelector(".d2h-diff-tbody");
+    if (!tbody) return;
+
+    const rows = Array.from(tbody.querySelectorAll("tr"));
+    if (rows.length === 0) return;
+
+    // Tag each row as "change" or "context"
+    const isChange = rows.map(row => {
+      return !!(row.querySelector("td.d2h-ins") || row.querySelector("td.d2h-del"));
+    });
+
+    // For each row, compute distance to nearest change
+    const dist = new Array(rows.length).fill(Infinity);
+    // Forward pass
+    let lastChange = -Infinity;
+    for (let i = 0; i < rows.length; i++) {
+      if (isChange[i]) lastChange = i;
+      dist[i] = i - lastChange;
+    }
+    // Backward pass
+    lastChange = Infinity;
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (isChange[i]) lastChange = i;
+      dist[i] = Math.min(dist[i], lastChange - i);
+    }
+
+    // Find runs of context rows that are far from changes
+    let i = 0;
+    while (i < rows.length) {
+      // Skip hunk info rows
+      if (rows[i].querySelector(".d2h-info")) { i++; continue; }
+
+      if (dist[i] > CONTEXT_PADDING && !isChange[i]) {
+        // Start of a collapsible run
+        const start = i;
+        while (i < rows.length && dist[i] > CONTEXT_PADDING && !isChange[i] && !rows[i].querySelector(".d2h-info")) {
+          i++;
+        }
+        const end = i; // exclusive
+        const count = end - start;
+
+        if (count >= MIN_COLLAPSIBLE) {
+          // Hide these rows
+          for (let j = start; j < end; j++) {
+            rows[j].classList.add("collapsed-context");
+            rows[j].style.display = "none";
+          }
+
+          // Insert an expand button row
+          const expandRow = document.createElement("tr");
+          expandRow.className = "context-expand-row";
+
+          const expandCell = document.createElement("td");
+          expandCell.colSpan = 20;
+          expandCell.className = "context-expand-cell";
+
+          const btn = document.createElement("button");
+          btn.className = "context-expand-btn";
+          btn.textContent = `Show ${count} hidden lines`;
+
+          btn.addEventListener("click", () => {
+            for (let j = start; j < end; j++) {
+              rows[j].style.display = "";
+              rows[j].classList.remove("collapsed-context");
+            }
+            expandRow.remove();
+          });
+
+          expandCell.appendChild(btn);
+          expandRow.appendChild(expandCell);
+
+          // Insert before the first hidden row
+          rows[start].before(expandRow);
+        }
+      } else {
+        i++;
+      }
+    }
+  });
 }
 
 // ── Add collapse/expand toggles to file headers ────────────────────────────

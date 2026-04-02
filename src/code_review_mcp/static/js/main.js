@@ -126,9 +126,25 @@ function initThemeToggle() {
 function initSidebarToggle() {
   const toggle = document.getElementById("sidebar-toggle");
   const sidebar = document.getElementById("file-sidebar");
+  const resizeHandle = document.getElementById("resize-sidebar");
 
   toggle.addEventListener("click", () => {
+    const willCollapse = !sidebar.classList.contains("collapsed");
+    // Clear any inline width from resize dragging so CSS class takes effect
+    if (willCollapse) {
+      sidebar.dataset.prevWidth = sidebar.style.width || "";
+      sidebar.style.width = "";
+    } else {
+      // Restore previous width when expanding
+      if (sidebar.dataset.prevWidth) {
+        sidebar.style.width = sidebar.dataset.prevWidth;
+      }
+    }
     sidebar.classList.toggle("collapsed");
+    // Hide/show the resize handle too
+    if (resizeHandle) {
+      resizeHandle.style.display = willCollapse ? "none" : "";
+    }
   });
 }
 
