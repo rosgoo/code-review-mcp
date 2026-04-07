@@ -16,7 +16,7 @@ from code_review_mcp.state import broadcast, state
 from code_review_mcp.web import start_web_server
 
 mcp = FastMCP(
-    name="code-review-mcp",
+    name="code",
     instructions=(
         "Interactive code review and file viewer tool with GitHub-style UI. "
         "Use show_files to display any files in the browser with syntax highlighting "
