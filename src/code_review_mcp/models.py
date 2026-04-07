@@ -37,6 +37,11 @@ class FileView:
     path: str
     content: str
     language: str
+    # For annotated file view: which lines are additions/deletions
+    added_lines: list[int] = field(default_factory=list)
+    deleted_lines: list[int] = field(default_factory=list)
+    # Deleted line contents (keyed by the line number they appear before)
+    deleted_content: dict[int, list[str]] = field(default_factory=dict)
 
 
 @dataclass

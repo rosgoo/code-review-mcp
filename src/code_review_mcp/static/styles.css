@@ -1374,6 +1374,27 @@ body.resizing * { cursor: col-resize !important; user-select: none; }
   border: none;
 }
 
+/* Line change highlighting */
+.file-view-line.line-added .file-view-num { background: var(--green-bg) !important; }
+.file-view-line.line-added .file-view-code { background: var(--green-bg); }
+.file-view-line.line-added { border-left: 3px solid var(--green); }
+
+.file-view-line.line-deleted .file-view-num { background: var(--red-bg) !important; }
+.file-view-line.line-deleted .file-view-code { background: var(--red-bg); }
+.file-view-line.line-deleted { border-left: 3px solid var(--red); opacity: 0.7; }
+
+.file-view-line.line-deleted .file-view-code pre { text-decoration: line-through; }
+.del-num { color: var(--red) !important; }
+
+.file-view-stats {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
 /* Reuse line-add-btn from diff view */
 .file-view-line:hover .line-add-btn { opacity: 1; }
 

@@ -33,6 +33,11 @@ export async function renderFiles() {
     wrapper.className = "file-view-wrapper";
     wrapper.dataset.filePath = file.path;
 
+    const hasAnnotations = (file.added_lines && file.added_lines.length > 0) ||
+                           (file.deleted_lines && file.deleted_lines.length > 0);
+    const addedSet = new Set(file.added_lines || []);
+    const deletedContent = file.deleted_content || {};
+
     // File header
     const header = document.createElement("div");
     header.className = "file-view-header";
@@ -51,59 +56,108 @@ export async function renderFiles() {
     fileName.textContent = file.path;
     header.appendChild(fileName);
 
-    const lineCount = document.createElement("span");
-    lineCount.className = "file-view-line-count";
-    const lines = file.content.split("\n");
-    lineCount.textContent = `${lines.length} lines`;
-    header.appendChild(lineCount);
+    if (hasAnnotations) {
+      const stats = document.createElement("span");
+      stats.className = "file-view-stats";
+      const adds = (file.added_lines || []).length;
+      const dels = Object.values(deletedContent).reduce((n, arr) => n + arr.length, 0);
+      if (adds > 0) {
+        const s = document.createElement("span");
+        s.className = "file-stat-add";
+        s.textContent = `+${adds}`;
+        stats.appendChild(s);
+      }
+      if (dels > 0) {
+        const s = document.createElement("span");
+        s.className = "file-stat-del";
+        s.textContent = `-${dels}`;
+        stats.appendChild(s);
+      }
+      header.appendChild(stats);
+    } else {
+      const lineCount = document.createElement("span");
+      lineCount.className = "file-view-line-count";
+      const lines = file.content.split("\n");
+      lineCount.textContent = `${lines.length} lines`;
+      header.appendChild(lineCount);
+    }
 
     wrapper.appendChild(header);
 
-    // File body — code table with line numbers
+    // File body
     const body = document.createElement("div");
     body.className = "file-view-body";
 
     const table = document.createElement("table");
     table.className = "file-view-table";
-
     const tbody = document.createElement("tbody");
 
+    const lines = file.content.split("\n");
+
     lines.forEach((line, i) => {
+      const lineNum = i + 1;
+
+      // Insert deleted lines before this line (if any)
+      const delsHere = deletedContent[String(lineNum)];
+      if (delsHere) {
+        delsHere.forEach(delLine => {
+          const delTr = document.createElement("tr");
+          delTr.className = "file-view-line line-deleted";
+
+          const delNumTd = document.createElement("td");
+          delNumTd.className = "file-view-num del-num";
+          delTr.appendChild(delNumTd);
+
+          const delCodeTd = document.createElement("td");
+          delCodeTd.className = "file-view-code";
+          const delPre = document.createElement("pre");
+          const delCode = document.createElement("code");
+          delCode.className = file.language ? `language-${file.language}` : "";
+          delCode.textContent = delLine || " ";
+          delPre.appendChild(delCode);
+          delCodeTd.appendChild(delPre);
+          delTr.appendChild(delCodeTd);
+
+          tbody.appendChild(delTr);
+        });
+      }
+
       const tr = document.createElement("tr");
       tr.className = "file-view-line";
-      tr.dataset.lineNum = i + 1;
+      tr.dataset.lineNum = lineNum;
+
+      if (addedSet.has(lineNum)) {
+        tr.classList.add("line-added");
+      }
 
       // Line number cell
       const numTd = document.createElement("td");
       numTd.className = "file-view-num";
-      numTd.textContent = i + 1;
+      numTd.textContent = lineNum;
       numTd.style.position = "relative";
 
-      // Add comment button
       const addBtn = document.createElement("button");
       addBtn.className = "line-add-btn";
       addBtn.textContent = "+";
       addBtn.title = "Add comment";
       addBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        openFileCommentForm(tr, file.path, i + 1, line);
+        openFileCommentForm(tr, file.path, lineNum, line);
       });
       numTd.appendChild(addBtn);
-
       tr.appendChild(numTd);
 
       // Code cell
       const codeTd = document.createElement("td");
       codeTd.className = "file-view-code";
-
       const codePre = document.createElement("pre");
       const codeEl = document.createElement("code");
       codeEl.className = file.language ? `language-${file.language}` : "";
-      codeEl.textContent = line || " "; // empty lines need a space for height
+      codeEl.textContent = line || " ";
       codePre.appendChild(codeEl);
       codeTd.appendChild(codePre);
-
       tr.appendChild(codeTd);
+
       tbody.appendChild(tr);
     });
 
@@ -112,13 +166,90 @@ export async function renderFiles() {
     wrapper.appendChild(body);
     container.appendChild(wrapper);
 
-    // Run highlight.js on the code blocks
+    // Syntax highlighting
     if (window.hljs) {
       wrapper.querySelectorAll("code[class^='language-']").forEach(block => {
         hljs.highlightElement(block);
       });
     }
+
+    // Collapse unchanged regions (only for annotated files)
+    if (hasAnnotations) {
+      collapseUnchangedRegions(tbody, addedSet, deletedContent);
+    }
   });
+}
+
+// ── Collapse unchanged regions ──────────────────────────────────────────────
+
+const CONTEXT_PADDING = 4; // lines of context to keep around changes
+const MIN_COLLAPSIBLE = 5; // minimum lines to bother collapsing
+
+function collapseUnchangedRegions(tbody, addedSet, deletedContent) {
+  const rows = Array.from(tbody.querySelectorAll("tr.file-view-line"));
+
+  // Mark each row as "changed" or not
+  const isChanged = rows.map(row => {
+    if (row.classList.contains("line-added") || row.classList.contains("line-deleted")) return true;
+    const lineNum = parseInt(row.dataset.lineNum, 10);
+    // Check if deleted content appears right before or after this line
+    if (deletedContent[String(lineNum)] || deletedContent[String(lineNum + 1)]) return true;
+    return false;
+  });
+
+  // Compute distance to nearest changed line
+  const dist = new Array(rows.length).fill(Infinity);
+  let lastChanged = -Infinity;
+  for (let i = 0; i < rows.length; i++) {
+    if (isChanged[i]) lastChanged = i;
+    dist[i] = i - lastChanged;
+  }
+  lastChanged = Infinity;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (isChanged[i]) lastChanged = i;
+    dist[i] = Math.min(dist[i], lastChanged - i);
+  }
+
+  // Collapse runs of unchanged lines far from changes
+  let i = 0;
+  while (i < rows.length) {
+    if (dist[i] > CONTEXT_PADDING && !isChanged[i]) {
+      const start = i;
+      while (i < rows.length && dist[i] > CONTEXT_PADDING && !isChanged[i]) i++;
+      const end = i;
+      const count = end - start;
+
+      if (count >= MIN_COLLAPSIBLE) {
+        for (let j = start; j < end; j++) {
+          rows[j].classList.add("collapsed-context");
+          rows[j].style.display = "none";
+        }
+
+        const expandRow = document.createElement("tr");
+        expandRow.className = "context-expand-row";
+        const expandCell = document.createElement("td");
+        expandCell.colSpan = 2;
+        expandCell.className = "context-expand-cell";
+
+        const btn = document.createElement("button");
+        btn.className = "context-expand-btn";
+        btn.textContent = `Show ${count} hidden lines`;
+        btn.addEventListener("click", () => {
+          for (let j = start; j < end; j++) {
+            rows[j].style.display = "";
+            rows[j].classList.remove("collapsed-context");
+          }
+          expandRow.remove();
+        });
+
+        expandCell.appendChild(btn);
+        expandRow.appendChild(expandCell);
+        rows[start].before(expandRow);
+      }
+    } else {
+      i++;
+    }
+  }
 }
 
 function openFileCommentForm(row, filePath, lineNumber, lineContent) {

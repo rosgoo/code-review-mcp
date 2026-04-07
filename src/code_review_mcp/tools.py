@@ -169,14 +169,19 @@ def open_diff(
     diff: str = "",
     diff_file: str = "",
     title: str = "Code Review",
+    working_dir: str = "",
 ) -> dict[str, object]:
-    """Open a unified diff in the browser for interactive code review.
+    """Open a diff in the browser for interactive code review.
 
     PREFERRED: Write the diff to a temp file and pass diff_file="/tmp/review.diff"
-    instead of inlining content in diff. This keeps the tool call small.
+    instead of inlining content in diff.
+
+    Pass working_dir to enable annotated file view — the full files are read from
+    disk with changed lines highlighted and unchanged regions collapsed.
+    If working_dir is omitted, falls back to standard diff rendering.
 
     Accepts standard unified diff format (output of `git diff`).
-    If both are given, diff_file takes precedence.
+    If both diff and diff_file are given, diff_file takes precedence.
     Opens the browser automatically. Returns {"url": str}.
     """
     diff_text = diff
@@ -189,8 +194,15 @@ def open_diff(
 
     port, url = _ensure_server()
 
+    # Try to build annotated file views by reading full files
+    file_views = _build_annotated_files(diff_text, working_dir)
+
     with state.lock:
-        state.mode = "diff"
+        if file_views:
+            state.mode = "files"
+            state.files = file_views
+        else:
+            state.mode = "diff"
         state.diff_text = diff_text
         state.title = title
         state.comments.clear()
@@ -199,6 +211,65 @@ def open_diff(
     threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
 
     return {"url": url}
+
+
+def _build_annotated_files(diff_text: str, working_dir: str) -> list[FileView]:
+    """Parse diff and read full files from disk. Returns annotated FileViews or empty list."""
+    from code_review_mcp.diffparser import parse_diff
+
+    if not working_dir:
+        # Try to guess working dir from diff file paths
+        working_dir = "."
+
+    base = Path(working_dir).expanduser().resolve()
+    file_diffs = parse_diff(diff_text)
+    views: list[FileView] = []
+
+    for fd in file_diffs:
+        file_path = base / fd.new_path
+        if not file_path.is_file():
+            # File might have been deleted — skip
+            continue
+
+        try:
+            content = file_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+
+        # Build deleted content map: for each line where deletions appear,
+        # store the deleted lines that should show before that new-file line
+        deleted_content: dict[int, list[str]] = {}
+        current_del_block: list[str] = []
+        next_new_line: int | None = None
+
+        for change in fd.changes:
+            if change.change_type == "delete":
+                current_del_block.append(change.content)
+            else:
+                if current_del_block:
+                    deleted_content[change.line_number] = current_del_block
+                    current_del_block = []
+
+        # Any trailing deletions at end of hunk
+        if current_del_block and fd.changes:
+            last_new = max(
+                (c.line_number for c in fd.changes if c.change_type != "delete"),
+                default=1,
+            )
+            deleted_content[last_new + 1] = current_del_block
+
+        views.append(
+            FileView(
+                path=fd.new_path,
+                content=content,
+                language=_detect_language(fd.new_path),
+                added_lines=sorted(fd.added_lines),
+                deleted_lines=sorted(fd.deleted_lines),
+                deleted_content=deleted_content,
+            )
+        )
+
+    return views
 
 
 @mcp.tool()

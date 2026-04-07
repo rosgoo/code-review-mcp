@@ -6,11 +6,18 @@ from code_review_mcp.models import Comment, FileView, Reply
 
 
 def serialize_file(f: FileView) -> dict[str, object]:
-    return {
+    result: dict[str, object] = {
         "path": f.path,
         "content": f.content,
         "language": f.language,
     }
+    if f.added_lines:
+        result["added_lines"] = f.added_lines
+    if f.deleted_lines:
+        result["deleted_lines"] = f.deleted_lines
+    if f.deleted_content:
+        result["deleted_content"] = {str(k): v for k, v in f.deleted_content.items()}
+    return result
 
 
 def serialize_reply(r: Reply) -> dict[str, object]:
