@@ -124,17 +124,27 @@ def show_files(
 
     if paths:
         for p in paths:
-            path = Path(p).expanduser().resolve()
-            if path.is_file():
+            resolved = Path(p).expanduser().resolve()
+            if resolved.is_file():
                 try:
-                    text = path.read_text(encoding="utf-8", errors="replace")
+                    text = resolved.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     text = f"# Error reading {p}"
+                # Use the original path for display (shorter), resolved for reading
                 file_views.append(
                     FileView(
-                        path=str(path),
+                        path=p,
                         content=text,
-                        language=_detect_language(str(path)),
+                        language=_detect_language(p),
+                    )
+                )
+            else:
+                # File not found — still add it so Claude sees the error
+                file_views.append(
+                    FileView(
+                        path=p,
+                        content=f"# File not found: {resolved}",
+                        language="plaintext",
                     )
                 )
     elif content or content_file:

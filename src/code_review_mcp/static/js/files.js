@@ -498,26 +498,114 @@ export function buildFileSidebar() {
   treeEl.textContent = "";
 
   const wrappers = document.querySelectorAll(".file-view-wrapper");
+  const files = [];
   wrappers.forEach(wrapper => {
-    const filePath = wrapper.dataset.filePath;
-    const fileEl = document.createElement("div");
-    fileEl.className = "file-tree-file";
-    fileEl.style.paddingLeft = "10px";
+    files.push({ path: wrapper.dataset.filePath, wrapper });
+  });
 
-    const name = document.createElement("span");
-    name.className = "file-tree-file-name";
-    name.textContent = filePath;
-    name.title = filePath;
-    fileEl.appendChild(name);
+  // Build directory tree
+  const tree = {};
+  files.forEach(f => {
+    const parts = f.path.split("/");
+    let node = tree;
+    parts.forEach((part, i) => {
+      if (i === parts.length - 1) {
+        if (!node._files) node._files = [];
+        node._files.push({ name: part, ...f });
+      } else {
+        if (!node[part]) node[part] = {};
+        node = node[part];
+      }
+    });
+  });
 
-    fileEl.addEventListener("click", () => {
-      document.querySelectorAll(".file-tree-file").forEach(el => el.classList.remove("active"));
-      fileEl.classList.add("active");
-      wrapper.scrollIntoView({ behavior: "smooth", block: "start" });
+  // Collapse single-child directory chains
+  function getCollapsedDirName(node, name) {
+    const dirs = Object.keys(node).filter(k => k !== "_files");
+    const hasFiles = node._files && node._files.length > 0;
+    if (dirs.length === 1 && !hasFiles) {
+      return getCollapsedDirName(node[dirs[0]], name + "/" + dirs[0]);
+    }
+    return { name, node };
+  }
+
+  function renderTreeNode(node, parentEl, depth) {
+    const dirs = Object.keys(node).filter(k => k !== "_files").sort();
+    dirs.forEach(dirName => {
+      const { name: collapsedName, node: collapsedNode } = getCollapsedDirName(node[dirName], dirName);
+
+      const dirEl = document.createElement("div");
+      dirEl.className = "file-tree-dir";
+
+      const label = document.createElement("div");
+      label.className = "file-tree-dir-label";
+      label.style.paddingLeft = (10 + depth * 16) + "px";
+
+      const toggle = document.createElement("span");
+      toggle.className = "file-tree-dir-toggle";
+      toggle.textContent = "\u203A";
+      label.appendChild(toggle);
+
+      const name = document.createElement("span");
+      name.className = "file-tree-dir-name";
+      name.textContent = collapsedName;
+      name.title = collapsedName;
+      label.appendChild(name);
+
+      label.addEventListener("click", () => dirEl.classList.toggle("collapsed"));
+
+      dirEl.appendChild(label);
+
+      const children = document.createElement("div");
+      children.className = "file-tree-dir-children";
+      renderTreeNode(collapsedNode, children, depth + 1);
+      dirEl.appendChild(children);
+
+      parentEl.appendChild(dirEl);
     });
 
-    treeEl.appendChild(fileEl);
-  });
+    if (node._files) {
+      node._files.forEach(f => {
+        const fileEl = document.createElement("div");
+        fileEl.className = "file-tree-file";
+        fileEl.style.paddingLeft = (10 + (depth + (dirs.length > 0 ? 1 : 0)) * 16) + "px";
+
+        const name = document.createElement("span");
+        name.className = "file-tree-file-name";
+        name.textContent = f.name;
+        name.title = f.path;
+        fileEl.appendChild(name);
+
+        fileEl.addEventListener("click", () => {
+          document.querySelectorAll(".file-tree-file").forEach(el => el.classList.remove("active"));
+          fileEl.classList.add("active");
+          f.wrapper.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+
+        parentEl.appendChild(fileEl);
+      });
+    }
+  }
+
+  renderTreeNode(tree, treeEl, 0);
+
+  // Init filter
+  const filterInput = document.getElementById("file-filter");
+  if (filterInput && !filterInput._fileBound) {
+    filterInput._fileBound = true;
+    filterInput.addEventListener("input", () => {
+      const filter = filterInput.value.toLowerCase();
+      treeEl.querySelectorAll(".file-tree-file").forEach(el => {
+        const path = el.querySelector(".file-tree-file-name")?.title || "";
+        el.style.display = path.toLowerCase().includes(filter) ? "" : "none";
+      });
+      // Show/hide dirs based on whether they have visible children
+      treeEl.querySelectorAll(".file-tree-dir").forEach(dir => {
+        const visibleFiles = dir.querySelectorAll(".file-tree-file:not([style*='display: none'])");
+        dir.style.display = visibleFiles.length > 0 ? "" : "none";
+      });
+    });
+  }
 }
 
 export async function loadExistingFileComments() {
