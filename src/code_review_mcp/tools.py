@@ -27,9 +27,14 @@ mcp = FastMCP(
         "IMPORTANT: When calling open_diff or update_diff, prefer writing the "
         "content to a temporary file and passing the file path instead of inlining. "
         "This avoids bloating the tool call payload.\n\n"
-        "Use show_files proactively when the user would benefit from seeing code "
-        "in a formatted view — for example after making changes, when explaining "
-        "code, or when reviewing specific files."
+        "PROACTIVE USAGE — You MUST use show_files in these situations:\n"
+        "- When showing code changes you just made (pass the modified files)\n"
+        "- When the user asks to see, review, or look at any file(s)\n"
+        "- When explaining code that spans more than ~20 lines\n"
+        "- When comparing implementations or showing examples\n"
+        "- After completing a task that modified files, show what changed\n"
+        "The browser view is always better than dumping code in the terminal. "
+        "Default to using show_files over printing code inline."
     ),
 )
 
