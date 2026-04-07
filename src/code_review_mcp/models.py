@@ -33,9 +33,18 @@ class Comment:
 
 
 @dataclass
+class FileView:
+    path: str
+    content: str
+    language: str
+
+
+@dataclass
 class ReviewState:
+    mode: Literal["diff", "files", "empty"] = "empty"
     diff_text: str = ""
     title: str = "Code Review"
+    files: list[FileView] = field(default_factory=list)
     comments: list[Comment] = field(default_factory=list)
     sse_subscribers: list[queue.SimpleQueue[str]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)

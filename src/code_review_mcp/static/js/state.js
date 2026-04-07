@@ -1,12 +1,22 @@
 // Client-side state store
 
+export let currentMode = "empty"; // "diff", "files", "empty"
 export let diffData = { diff: "", title: "" };
+export let filesData = { files: [], title: "" };
 export let comments = [];
 export let viewMode = "line-by-line"; // or "side-by-side"
 let nextLocalId = 1;
 
+export function setMode(mode) {
+  currentMode = mode;
+}
+
 export function setDiffData(data) {
   diffData = data;
+}
+
+export function setFilesData(data) {
+  filesData = data;
 }
 
 export function setViewMode(mode) {

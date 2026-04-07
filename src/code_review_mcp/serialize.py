@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from code_review_mcp.models import Comment, Reply
+from code_review_mcp.models import Comment, FileView, Reply
+
+
+def serialize_file(f: FileView) -> dict[str, object]:
+    return {
+        "path": f.path,
+        "content": f.content,
+        "language": f.language,
+    }
 
 
 def serialize_reply(r: Reply) -> dict[str, object]:

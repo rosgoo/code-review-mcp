@@ -1284,6 +1284,99 @@ body.resizing * { cursor: col-resize !important; user-select: none; }
   color: var(--text-muted);
 }
 
+/* ── File Viewer ─────────────────────────────────────────────────────── */
+
+.file-view-wrapper {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin: 16px;
+  overflow: hidden;
+}
+
+.file-view-wrapper.file-collapsed .file-view-body { display: none; }
+
+.file-view-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 48px;
+  z-index: 5;
+}
+
+.file-view-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-view-line-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.file-view-body { overflow-x: auto; }
+
+.file-view-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.file-view-line { position: relative; }
+
+.file-view-line:hover { background: var(--accent-subtle); }
+
+.file-view-num {
+  width: 1%;
+  min-width: 50px;
+  padding: 0 12px 0 8px;
+  text-align: right;
+  color: var(--text-muted);
+  user-select: none;
+  vertical-align: top;
+  border-right: 1px solid var(--border-light);
+  background: var(--surface);
+}
+
+.file-view-code {
+  padding: 0 12px;
+  white-space: pre;
+  color: var(--text);
+}
+
+.file-view-code pre {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.file-view-code code {
+  font-family: inherit;
+  font-size: inherit;
+  background: transparent;
+  padding: 0;
+  border: none;
+}
+
+/* Reuse line-add-btn from diff view */
+.file-view-line:hover .line-add-btn { opacity: 1; }
+
 /* ── Scrollbar ───────────────────────────────────────────────────────── */
 
 .file-sidebar::-webkit-scrollbar,

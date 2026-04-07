@@ -1,10 +1,11 @@
-// Entry point — init + footer submit logic
+// Entry point — init + footer submit + mode routing
 
 import { renderDiff, loadExistingComments, renderInlineThreads, buildFileTree } from './diff.js';
+import { renderFiles, loadExistingFileComments, renderFileInlineThreads, buildFileSidebar } from './files.js';
 import { connectSSE } from './sse.js';
 import { renderCommentSidebar, updatePendingCount } from './comments.js';
-import { submitAllDrafts, postComment } from './api.js';
-import { comments, addComment, getNextLocalId, setViewMode } from './state.js';
+import { submitAllDrafts, postComment, fetchView } from './api.js';
+import { comments, addComment, getNextLocalId, setViewMode, currentMode, setMode } from './state.js';
 import { initResizeHandles } from './resize.js';
 
 const DEFAULT_BTN_TEXT = "Submit Comments";
@@ -22,6 +23,37 @@ function resetButton(btn, delay = 2500) {
     morphButton(btn, "", DEFAULT_BTN_TEXT);
   }, delay);
 }
+
+// ── Mode-aware render ──────────────────────────────────────────────────────
+
+export async function renderCurrentView() {
+  // Fetch mode from server
+  const data = await fetchView();
+  setMode(data.mode);
+
+  if (data.mode === "diff") {
+    document.querySelector(".view-toggle").style.display = "";
+    await renderDiff();
+    buildFileTree();
+    await loadExistingComments();
+    renderInlineThreads();
+  } else if (data.mode === "files") {
+    await renderFiles();
+    buildFileSidebar();
+    await loadExistingFileComments();
+    renderFileInlineThreads();
+  } else {
+    document.getElementById("diff-content").textContent = "";
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "Waiting for Claude to send code...";
+    document.getElementById("diff-content").appendChild(empty);
+  }
+
+  renderCommentSidebar();
+}
+
+// ── Footer ─────────────────────────────────────────────────────────────────
 
 function initFooter() {
   const btn = document.getElementById("submit-btn");
@@ -73,7 +105,12 @@ function initFooter() {
         if (c.status === "draft") c.status = "submitted";
       });
       document.getElementById("overall-feedback").value = "";
-      renderInlineThreads();
+      // Re-render threads for current mode
+      if (currentMode === "diff") {
+        renderInlineThreads();
+      } else if (currentMode === "files") {
+        renderFileInlineThreads();
+      }
       renderCommentSidebar();
       morphButton(btn, "sent", "Sent");
       resetButton(btn);
@@ -100,18 +137,13 @@ function initViewToggle() {
       buttons.forEach(b => b.classList.remove("active"));
       btn.classList.add("active");
       setViewMode(btn.dataset.view);
-      renderDiff().then(() => {
-        buildFileTree();
-        renderInlineThreads();
-        renderCommentSidebar();
-      });
+      renderCurrentView();
     });
   });
 }
 
 function initThemeToggle() {
   const toggle = document.getElementById("theme-toggle");
-  // Load saved preference
   const saved = localStorage.getItem("code-review-theme");
   if (saved) document.documentElement.setAttribute("data-theme", saved);
 
@@ -130,18 +162,15 @@ function initSidebarToggle() {
 
   toggle.addEventListener("click", () => {
     const willCollapse = !sidebar.classList.contains("collapsed");
-    // Clear any inline width from resize dragging so CSS class takes effect
     if (willCollapse) {
       sidebar.dataset.prevWidth = sidebar.style.width || "";
       sidebar.style.width = "";
     } else {
-      // Restore previous width when expanding
       if (sidebar.dataset.prevWidth) {
         sidebar.style.width = sidebar.dataset.prevWidth;
       }
     }
     sidebar.classList.toggle("collapsed");
-    // Hide/show the resize handle too
     if (resizeHandle) {
       resizeHandle.style.display = willCollapse ? "none" : "";
     }
@@ -152,11 +181,7 @@ async function init() {
   initThemeToggle();
   initSidebarToggle();
 
-  await renderDiff();
-  buildFileTree();
-  await loadExistingComments();
-  renderInlineThreads();
-  renderCommentSidebar();
+  await renderCurrentView();
   connectSSE();
   initFooter();
   initViewToggle();

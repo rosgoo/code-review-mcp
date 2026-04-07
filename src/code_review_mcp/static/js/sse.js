@@ -1,22 +1,17 @@
 // SSE connection and event handling
 
-import { comments, findCommentByServerId } from './state.js';
-import { renderDiff, loadExistingComments } from './diff.js';
-import { renderCommentSidebar } from './comments.js';
-import { morphButton } from './main.js';
+import { comments, findCommentByServerId, currentMode } from './state.js';
 import { renderInlineThreads } from './diff.js';
+import { renderFileInlineThreads } from './files.js';
+import { renderCommentSidebar } from './comments.js';
+import { morphButton, renderCurrentView } from './main.js';
 
 export function connectSSE() {
   const es = new EventSource("/events");
   es.onmessage = (e) => {
     const msg = JSON.parse(e.data);
-    if (msg.type === "diff_updated") {
-      renderDiff().then(() => {
-        loadExistingComments().then(() => {
-          renderInlineThreads();
-          renderCommentSidebar();
-        });
-      });
+    if (msg.type === "view_updated" || msg.type === "diff_updated") {
+      renderCurrentView();
     } else if (msg.type === "reply_added") {
       handleReplyAdded(msg);
     } else if (msg.type === "comment_resolved") {
@@ -30,7 +25,7 @@ function handleCommentResolved(msg) {
   const c = findCommentByServerId(msg.comment_id);
   if (!c) return;
   c.status = "resolved";
-  renderInlineThreads();
+  rerenderThreads();
   renderCommentSidebar();
 }
 
@@ -38,7 +33,6 @@ function handleReplyAdded(msg) {
   const c = findCommentByServerId(msg.comment_id);
   if (!c) return;
   if (!c.replies) c.replies = [];
-  // Avoid duplicates
   if (!c.replies.find(r => r.id === msg.reply.id)) {
     c.replies.push(msg.reply);
   }
@@ -47,6 +41,14 @@ function handleReplyAdded(msg) {
     const btn = document.getElementById("submit-btn");
     if (btn) morphButton(btn, "awaiting", "Awaiting revision");
   }
-  renderInlineThreads();
+  rerenderThreads();
   renderCommentSidebar();
+}
+
+function rerenderThreads() {
+  if (currentMode === "diff") {
+    renderInlineThreads();
+  } else if (currentMode === "files") {
+    renderFileInlineThreads();
+  }
 }

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from code_review_mcp.models import Reply
+from code_review_mcp.models import FileView, Reply
 from code_review_mcp.serialize import serialize_comment, serialize_reply
 from code_review_mcp.state import broadcast, state
 from code_review_mcp.web import start_web_server
@@ -18,19 +18,150 @@ from code_review_mcp.web import start_web_server
 mcp = FastMCP(
     name="code-review-mcp",
     instructions=(
-        "Interactive code review tool with GitHub-style diff UI. "
-        "Publish a diff with open_diff, then poll get_comments for user "
-        "annotations on specific lines. Use reply_to_comment to respond "
-        "to specific comments in-thread. Use mark_comment_resolved to "
-        "mark comments as handled. Use update_diff to show updated code "
-        "after making changes.\n\n"
+        "Interactive code review and file viewer tool with GitHub-style UI. "
+        "Use show_files to display any files in the browser with syntax highlighting "
+        "and inline commenting. Use open_diff for unified diff review. "
+        "Poll get_comments for user annotations. Use reply_to_comment to respond "
+        "to specific comments in-thread. Use mark_comment_resolved to mark "
+        "comments as handled.\n\n"
         "IMPORTANT: When calling open_diff or update_diff, prefer writing the "
-        "diff to a temporary file and passing diff_file instead of inlining "
-        "the full content in diff. This avoids bloating the tool call payload. "
-        "Example: write diff to /tmp/review.diff, then call "
-        'open_diff(diff_file="/tmp/review.diff", title="Feature Review").'
+        "content to a temporary file and passing the file path instead of inlining. "
+        "This avoids bloating the tool call payload.\n\n"
+        "Use show_files proactively when the user would benefit from seeing code "
+        "in a formatted view — for example after making changes, when explaining "
+        "code, or when reviewing specific files."
     ),
 )
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+_EXT_TO_LANG: dict[str, str] = {
+    ".py": "python",
+    ".pyi": "python",
+    ".js": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".jsx": "javascript",
+    ".html": "html",
+    ".htm": "html",
+    ".css": "css",
+    ".scss": "scss",
+    ".less": "less",
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".md": "markdown",
+    ".mdx": "markdown",
+    ".sh": "bash",
+    ".bash": "bash",
+    ".zsh": "bash",
+    ".sql": "sql",
+    ".rs": "rust",
+    ".go": "go",
+    ".java": "java",
+    ".kt": "kotlin",
+    ".rb": "ruby",
+    ".php": "php",
+    ".swift": "swift",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".xml": "xml",
+    ".svg": "xml",
+    ".dockerfile": "dockerfile",
+    ".tf": "hcl",
+    ".graphql": "graphql",
+    ".gql": "graphql",
+    ".r": "r",
+    ".R": "r",
+}
+
+
+def _detect_language(file_path: str) -> str:
+    suffix = Path(file_path).suffix.lower()
+    return _EXT_TO_LANG.get(suffix, "plaintext")
+
+
+def _ensure_server() -> tuple[int, str]:
+    """Start the web server if not running. Returns (port, url)."""
+    port = start_web_server()
+    return port, f"http://127.0.0.1:{port}"
+
+
+# ── Tools ────────────────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def show_files(
+    paths: list[str] | None = None,
+    title: str = "File Viewer",
+    content: str = "",
+    content_file: str = "",
+    content_language: str = "",
+    content_filename: str = "file",
+) -> dict[str, object]:
+    """Show files in the browser with syntax highlighting and inline commenting.
+
+    Two modes:
+    1. Pass paths=["file1.py", "file2.ts"] to display files from disk.
+    2. Pass content="..." (or content_file="/tmp/code.py") for a single snippet,
+       with content_language and content_filename for display.
+
+    The browser opens automatically. Returns {"url": str}.
+    Users can add inline comments on any line.
+    """
+    port, url = _ensure_server()
+    file_views: list[FileView] = []
+
+    if paths:
+        for p in paths:
+            path = Path(p).expanduser().resolve()
+            if path.is_file():
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    text = f"# Error reading {p}"
+                file_views.append(
+                    FileView(
+                        path=str(path),
+                        content=text,
+                        language=_detect_language(str(path)),
+                    )
+                )
+    elif content or content_file:
+        text = content
+        if content_file:
+            path = Path(content_file).expanduser()
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if not content_language:
+                content_language = _detect_language(content_file)
+            if content_filename == "file":
+                content_filename = path.name
+        file_views.append(
+            FileView(
+                path=content_filename,
+                content=text,
+                language=content_language or "plaintext",
+            )
+        )
+
+    if not file_views:
+        return {"error": "Provide either paths or content/content_file"}
+
+    with state.lock:
+        state.mode = "files"
+        state.title = title
+        state.files = file_views
+        state.comments.clear()
+
+    broadcast("view_updated")
+    threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
+
+    return {"url": url, "file_count": len(file_views)}
 
 
 @mcp.tool()
@@ -46,8 +177,7 @@ def open_diff(
 
     Accepts standard unified diff format (output of `git diff`).
     If both are given, diff_file takes precedence.
-    Starts the web server on first call. Opens the browser automatically.
-    Returns {"port": int, "url": str}.
+    Opens the browser automatically. Returns {"url": str}.
     """
     diff_text = diff
     if diff_file:
@@ -57,18 +187,18 @@ def open_diff(
     if not diff_text:
         return {"error": "Provide either diff or diff_file"}
 
-    port = start_web_server()
-    url = f"http://127.0.0.1:{port}"
+    port, url = _ensure_server()
 
     with state.lock:
+        state.mode = "diff"
         state.diff_text = diff_text
         state.title = title
         state.comments.clear()
 
-    broadcast("diff_updated")
+    broadcast("view_updated")
     threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
 
-    return {"port": port, "url": url}
+    return {"url": url}
 
 
 @mcp.tool()
@@ -132,7 +262,6 @@ def update_diff(
     """Replace the diff with an updated version. Browser auto-refreshes via SSE.
 
     PREFERRED: Write diff to a temp file and pass diff_file instead of inlining.
-    Comments are preserved but may need re-anchoring by the user.
     """
     diff_text = diff
     if diff_file:
@@ -143,7 +272,8 @@ def update_diff(
         return {"error": "Provide either diff or diff_file"}
 
     with state.lock:
+        state.mode = "diff"
         state.diff_text = diff_text
 
-    broadcast("diff_updated")
+    broadcast("view_updated")
     return {"ok": True}

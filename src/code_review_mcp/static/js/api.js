@@ -1,5 +1,10 @@
 // All HTTP fetch calls
 
+export async function fetchView() {
+  const res = await fetch("/view");
+  return res.json();
+}
+
 export async function fetchDiff() {
   const res = await fetch("/diff");
   return res.json();

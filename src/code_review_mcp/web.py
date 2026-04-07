@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from code_review_mcp.models import Comment, CommentRequest, Reply, ReplyRequest
-from code_review_mcp.serialize import serialize_comment, serialize_reply
+from code_review_mcp.serialize import serialize_comment, serialize_file, serialize_reply
 from code_review_mcp.state import broadcast, find_free_port, state
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -32,6 +32,18 @@ _uvicorn_server: uvicorn.Server | None = None
 @api.get("/")
 def get_ui() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+
+
+@api.get("/view")
+def get_view() -> JSONResponse:
+    """Return the current view state (mode, title, and content)."""
+    with state.lock:
+        result: dict[str, object] = {"mode": state.mode, "title": state.title}
+        if state.mode == "diff":
+            result["diff"] = state.diff_text
+        elif state.mode == "files":
+            result["files"] = [serialize_file(f) for f in state.files]
+        return JSONResponse(result)
 
 
 @api.get("/diff")
