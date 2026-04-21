@@ -174,12 +174,63 @@ function initSidebarToggle() {
     if (resizeHandle) {
       resizeHandle.style.display = willCollapse ? "none" : "";
     }
+    updateInlineMaxWidth();
+  });
+}
+
+// Keep inline comment width constrained to visible viewport (minus file sidebar)
+function updateInlineMaxWidth() {
+  const sidebar = document.getElementById("file-sidebar");
+  const w = (sidebar && !sidebar.classList.contains("collapsed")) ? sidebar.offsetWidth : 0;
+  // 40px accounts for inner horizontal margins/padding around the thread
+  document.documentElement.style.setProperty(
+    "--inline-max-width",
+    `calc(100vw - ${w + 40}px)`
+  );
+}
+
+function initInlineWidthTracking() {
+  updateInlineMaxWidth();
+  window.addEventListener("resize", updateInlineMaxWidth);
+  // Observe sidebar width changes (from drag-resize)
+  const sidebar = document.getElementById("file-sidebar");
+  if (sidebar && "ResizeObserver" in window) {
+    const ro = new ResizeObserver(() => updateInlineMaxWidth());
+    ro.observe(sidebar);
+  }
+}
+
+function initCommentsToggle() {
+  const btn = document.getElementById("comments-toggle");
+  const panel = document.getElementById("comment-margin");
+  const closeBtn = document.getElementById("comments-close");
+  if (!btn || !panel) return;
+
+  function setOpen(open) {
+    panel.classList.toggle("open", open);
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  btn.addEventListener("click", () => {
+    setOpen(!panel.classList.contains("open"));
+  });
+
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => setOpen(false));
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && panel.classList.contains("open")) {
+      setOpen(false);
+    }
   });
 }
 
 async function init() {
   initThemeToggle();
   initSidebarToggle();
+  initCommentsToggle();
+  initInlineWidthTracking();
 
   await renderCurrentView();
   connectSSE();

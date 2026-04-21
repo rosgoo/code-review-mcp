@@ -30,6 +30,10 @@
           <button class="view-btn active" data-view="line-by-line">Unified</button>
           <button class="view-btn" data-view="side-by-side">Split</button>
         </div>
+        <button class="header-icon-btn" id="comments-toggle" title="Show comments overview" aria-expanded="false">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 2.75a.25.25 0 01.25-.25h12.5a.25.25 0 01.25.25v7.5a.25.25 0 01-.25.25h-3.5a.75.75 0 00-.53.22L8 12.94l-2.22-2.22a.75.75 0 00-.53-.22h-3.5a.25.25 0 01-.25-.25v-7.5zM1.75 1A1.75 1.75 0 000 2.75v7.5C0 11.216.784 12 1.75 12h3.19l2.1 2.1a1.75 1.75 0 002.47 0l2.1-2.1h3.19A1.75 1.75 0 0016 10.25v-7.5A1.75 1.75 0 0014.25 1H1.75z"/></svg>
+          <span class="header-icon-count" id="comments-toggle-count">0</span>
+        </button>
         <button class="theme-toggle" id="theme-toggle" title="Toggle theme">
           <svg class="icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12a4 4 0 100-8 4 4 0 000 8zm0-1.5a2.5 2.5 0 110-5 2.5 2.5 0 010 5zM8 0a.75.75 0 01.75.75v1.5a.75.75 0 01-1.5 0V.75A.75.75 0 018 0zm0 13a.75.75 0 01.75.75v1.5a.75.75 0 01-1.5 0v-1.5A.75.75 0 018 13zM2.343 2.343a.75.75 0 011.061 0l1.06 1.06a.75.75 0 01-1.06 1.06l-1.06-1.06a.75.75 0 010-1.06zm9.193 9.193a.75.75 0 011.06 0l1.06 1.06a.75.75 0 01-1.06 1.06l-1.06-1.06a.75.75 0 010-1.06zM0 8a.75.75 0 01.75-.75h1.5a.75.75 0 010 1.5H.75A.75.75 0 010 8zm13 0a.75.75 0 01.75-.75h1.5a.75.75 0 010 1.5h-1.5A.75.75 0 0113 8zM2.343 13.657a.75.75 0 010-1.06l1.06-1.06a.75.75 0 011.06 1.06l-1.06 1.06a.75.75 0 01-1.06 0zm9.193-9.193a.75.75 0 010-1.06l1.06-1.06a.75.75 0 111.06 1.06l-1.06 1.06a.75.75 0 01-1.06 0z"/></svg>
           <svg class="icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M9.598 1.591a.75.75 0 01.785-.175 7 7 0 11-8.967 8.967.75.75 0 01.961-.96 5.5 5.5 0 007.046-7.046.75.75 0 01.175-.786z"/></svg>
@@ -54,12 +58,16 @@
     <!-- Main diff area -->
     <div class="layout">
       <div class="main-content" id="diff-content"></div>
-      <div class="resize-handle" id="resize-comments" data-resize="comments"></div>
-      <div class="comment-margin" id="comment-margin">
-        <div class="margin-header">Comments</div>
-        <div class="margin-list" id="comment-list"></div>
-      </div>
     </div>
+  </div>
+
+  <!-- Comments drawer -->
+  <div class="comment-margin" id="comment-margin">
+    <div class="margin-header">
+      Comments
+      <button class="margin-close" id="comments-close" title="Close">&times;</button>
+    </div>
+    <div class="margin-list" id="comment-list"></div>
   </div>
 
   <!-- Footer -->

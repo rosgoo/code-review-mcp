@@ -53,6 +53,8 @@ class ReviewState:
     comments: list[Comment] = field(default_factory=list)
     sse_subscribers: list[queue.SimpleQueue[str]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # Fires when the user clicks Submit Comments — wakes any blocked wait_for_comments call
+    submit_event: threading.Event = field(default_factory=threading.Event)
 
 
 class CommentRequest(BaseModel):

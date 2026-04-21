@@ -105,4 +105,18 @@ export function updatePendingCount() {
     badge.textContent = `${n} draft${n === 1 ? "" : "s"}`;
     badge.classList.add("visible");
   }
+
+  // Update header toggle badge with total unresolved comment count
+  const toggleCount = document.getElementById("comments-toggle-count");
+  const toggleBtn = document.getElementById("comments-toggle");
+  if (toggleCount && toggleBtn) {
+    const total = comments.filter(c => c.status !== "resolved").length;
+    if (total === 0) {
+      toggleCount.classList.remove("visible");
+    } else {
+      toggleCount.textContent = total;
+      toggleCount.classList.add("visible");
+    }
+    toggleBtn.classList.toggle("has-drafts", n > 0);
+  }
 }

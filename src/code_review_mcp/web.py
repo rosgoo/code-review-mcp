@@ -82,6 +82,8 @@ def submit_all_drafts() -> JSONResponse:
             if comment.status == "draft":
                 comment.status = "submitted"
                 count += 1
+    # Wake any agent currently blocked in wait_for_comments
+    state.submit_event.set()
     return JSONResponse({"submitted": count})
 
 

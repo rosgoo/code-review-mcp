@@ -1,9 +1,7 @@
-// Column resize handles for file sidebar and comment margin
+// Column resize handle for file sidebar
 
 const MIN_SIDEBAR = 160;
 const MAX_SIDEBAR = 500;
-const MIN_COMMENTS = 200;
-const MAX_COMMENTS = 480;
 
 export function initResizeHandles() {
   initHandle('resize-sidebar', {
@@ -12,14 +10,6 @@ export function initResizeHandles() {
     applySize: (el, size) => { el.style.width = size + 'px'; },
     // Dragging right = grow sidebar
     calcNew: (delta, startSize) => Math.min(MAX_SIDEBAR, Math.max(MIN_SIDEBAR, startSize + delta)),
-  });
-
-  initHandle('resize-comments', {
-    getEl: () => document.getElementById('comment-margin'),
-    getSize: (el) => el.offsetWidth,
-    applySize: (el, size) => { el.style.width = size + 'px'; },
-    // Dragging left = grow comments (inverted)
-    calcNew: (delta, startSize) => Math.min(MAX_COMMENTS, Math.max(MIN_COMMENTS, startSize - delta)),
   });
 }
 

@@ -21,9 +21,12 @@ mcp = FastMCP(
         "Interactive code review and file viewer tool with GitHub-style UI. "
         "Use show_files to display any files in the browser with syntax highlighting "
         "and inline commenting. Use open_diff for unified diff review. "
-        "Poll get_comments for user annotations. Use reply_to_comment to respond "
-        "to specific comments in-thread. Use mark_comment_resolved to mark "
-        "comments as handled.\n\n"
+        "After opening, call wait_for_comments to block until the user clicks "
+        "Submit in the browser — it returns their comments as soon as they submit, "
+        "no polling needed. If it returns status=timeout, call it again to keep "
+        "waiting (or stop if the user told you to). Use reply_to_comment to "
+        "respond to specific comments in-thread. Use mark_comment_resolved to "
+        "mark comments as handled.\n\n"
         "IMPORTANT: When calling open_diff or update_diff, prefer writing the "
         "content to a temporary file and passing the file path instead of inlining. "
         "This avoids bloating the tool call payload.\n\n"
@@ -172,6 +175,7 @@ def show_files(
         state.title = title
         state.files = file_views
         state.comments.clear()
+        state.submit_event.clear()
 
     broadcast("view_updated")
     threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
@@ -221,6 +225,7 @@ def open_diff(
         state.diff_text = diff_text
         state.title = title
         state.comments.clear()
+        state.submit_event.clear()
 
     broadcast("view_updated")
     threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
@@ -296,6 +301,43 @@ def get_comments() -> list[dict[str, object]]:
     """
     with state.lock:
         return [serialize_comment(c) for c in state.comments if c.status == "submitted"]
+
+
+@mcp.tool()
+def wait_for_comments(timeout_seconds: int = 540) -> dict[str, object]:
+    """Block until the user clicks "Submit Comments" in the browser, then return them.
+
+    Call this immediately after open_diff or show_files to pause until the user
+    is done reviewing. Returns as soon as the user submits — no polling needed.
+
+    Supports multiple rounds: after handling a batch (replying / resolving /
+    pushing new code via update_diff), call wait_for_comments again to block
+    until the user submits the NEXT round. Only unresolved comments will be
+    returned, so mark_comment_resolved after you address each one.
+
+    If the user hasn't submitted within timeout_seconds, returns
+    {"status": "timeout"} with no comments. You may call this tool again to
+    keep waiting, or stop if the user indicated they're done by other means
+    (e.g. they closed the browser or sent a chat message).
+
+    Default timeout (540s = 9 min) stays under typical MCP client tool timeouts.
+
+    Returns:
+      {"status": "submitted", "comments": [...]} — user submitted (only
+        currently-unresolved submitted comments are returned)
+      {"status": "timeout"} — no submission within timeout_seconds
+    """
+    timeout = max(1, min(timeout_seconds, 3600))
+    fired = state.submit_event.wait(timeout=timeout)
+    if not fired:
+        return {"status": "timeout"}
+    with state.lock:
+        submitted = [
+            serialize_comment(c) for c in state.comments if c.status == "submitted"
+        ]
+        # Reset so the next wait_for_comments blocks until the NEXT submit
+        state.submit_event.clear()
+    return {"status": "submitted", "comments": submitted}
 
 
 @mcp.tool()
