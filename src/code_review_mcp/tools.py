@@ -63,6 +63,7 @@ _EXT_TO_LANG: dict[str, str] = {
     ".toml": "toml",
     ".md": "markdown",
     ".mdx": "markdown",
+    ".markdown": "markdown",
     ".sh": "bash",
     ".bash": "bash",
     ".zsh": "bash",

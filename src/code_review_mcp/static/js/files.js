@@ -37,6 +37,7 @@ export async function renderFiles() {
                            (file.deleted_lines && file.deleted_lines.length > 0);
     const addedSet = new Set(file.added_lines || []);
     const deletedContent = file.deleted_content || {};
+    const isMarkdown = file.language === "markdown" && !hasAnnotations;
 
     // File header
     const header = document.createElement("div");
@@ -82,11 +83,34 @@ export async function renderFiles() {
       header.appendChild(lineCount);
     }
 
+    // Markdown source/rendered toggle
+    let mdToggleBtn = null;
+    if (isMarkdown) {
+      mdToggleBtn = document.createElement("button");
+      mdToggleBtn.className = "md-view-toggle";
+      mdToggleBtn.type = "button";
+      mdToggleBtn.textContent = "Source";
+      mdToggleBtn.title = "Show source (for line-level commenting)";
+      header.appendChild(mdToggleBtn);
+    }
+
     wrapper.appendChild(header);
 
-    // File body
+    // Markdown rendered body
+    let mdBody = null;
+    if (isMarkdown) {
+      mdBody = document.createElement("div");
+      mdBody.className = "file-view-markdown markdown-body";
+      // Safe: DOMPurify.sanitize() strips XSS vectors before insertion
+      const sanitized = DOMPurify.sanitize(marked.parse(file.content));
+      mdBody.innerHTML = sanitized; // nosec: DOMPurify-sanitized
+      wrapper.appendChild(mdBody);
+    }
+
+    // File body (source view — hidden initially for markdown)
     const body = document.createElement("div");
     body.className = "file-view-body";
+    if (isMarkdown) body.style.display = "none";
 
     const table = document.createElement("table");
     table.className = "file-view-table";
@@ -176,6 +200,21 @@ export async function renderFiles() {
     // Collapse unchanged regions (only for annotated files)
     if (hasAnnotations) {
       collapseUnchangedRegions(tbody, addedSet, deletedContent);
+    }
+
+    // Wire markdown source/rendered toggle
+    if (mdToggleBtn && mdBody) {
+      mdToggleBtn.addEventListener("click", () => {
+        const showingSource = body.style.display !== "none";
+        const nextShowingSource = !showingSource;
+        mdBody.style.display = nextShowingSource ? "none" : "";
+        body.style.display = nextShowingSource ? "" : "none";
+        mdToggleBtn.textContent = nextShowingSource ? "Rendered" : "Source";
+        mdToggleBtn.title = nextShowingSource
+          ? "Switch back to rendered markdown"
+          : "Show source (for line-level commenting)";
+        wrapper.dataset.userToggled = "1";
+      });
     }
   });
 }
@@ -345,6 +384,23 @@ export function renderFileInlineThreads() {
     const key = `${c.filePath}:${c.lineNumber}`;
     if (!grouped.has(key)) grouped.set(key, []);
     grouped.get(key).push(c);
+  });
+
+  // For markdown files that have comments and the user hasn't manually toggled,
+  // force source view so comment threads anchor visibly.
+  const filesWithComments = new Set(comments.map(c => c.filePath));
+  document.querySelectorAll(".file-view-wrapper").forEach(wrapper => {
+    if (wrapper.dataset.userToggled === "1") return;
+    const mdBody = wrapper.querySelector(".file-view-markdown");
+    const sourceBody = wrapper.querySelector(".file-view-body");
+    const toggle = wrapper.querySelector(".md-view-toggle");
+    if (!mdBody || !sourceBody || !toggle) return;
+    if (filesWithComments.has(wrapper.dataset.filePath) && sourceBody.style.display === "none") {
+      mdBody.style.display = "none";
+      sourceBody.style.display = "";
+      toggle.textContent = "Rendered";
+      toggle.title = "Switch back to rendered markdown";
+    }
   });
 
   grouped.forEach((lineComments) => {
