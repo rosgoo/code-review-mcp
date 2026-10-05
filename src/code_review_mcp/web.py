@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import os
 from collections.abc import AsyncIterator, Collection
@@ -13,6 +14,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from code_review_mcp.cleanup import WorktreeSweeper
 from code_review_mcp.config import Settings
 from code_review_mcp.errors import ConflictError, NotFoundError, ReviewError
 from code_review_mcp.github import GitHubClient
@@ -20,6 +22,7 @@ from code_review_mcp.hub import ReviewHub
 from code_review_mcp.models import CommentRequest, ReplyRequest
 from code_review_mcp.pr_service import PrService
 from code_review_mcp.pr_web import build_pr_router
+from code_review_mcp.repo_config import load_repo_config
 from code_review_mcp.service import ReviewService
 from code_review_mcp.store import Store
 from code_review_mcp.tools import build_mcp, transport_security
@@ -80,7 +83,12 @@ def build_api_router(service: ReviewService, hub: ReviewHub, store: Store) -> AP
 
     @router.get("/health")
     async def health() -> dict[str, object]:
-        return {"status": "ok", "schema_version": store.schema_version}
+        counts = store.worktree_counts()
+        return {
+            "status": "ok",
+            "schema_version": store.schema_version,
+            "worktrees": {"count": counts.count, "released": counts.released},
+        }
 
     @router.get("/reviews")
     async def list_reviews() -> list[dict[str, object]]:
@@ -152,23 +160,31 @@ def create_app(
     """
     hub = ReviewHub()
     service = ReviewService(store, hub, settings)
+    github_client = github or GitHubClient()
     prs = PrService(
         store,
         hub,
         settings,
-        github or GitHubClient(),
+        github_client,
         worktrees or WorktreeManager(settings.home, credential_helper=gh_credential_helper()),
     )
+    sweeper = WorktreeSweeper(store, prs, github_client, lambda: load_repo_config(settings.home))
     security = transport_security(settings)
     mcp = build_mcp(service, prs, security)
     mcp_app = mcp.streamable_http_app()
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(running_app: FastAPI) -> AsyncIterator[None]:
+        sweep = asyncio.create_task(sweeper.run_forever()) if settings.cleanup_enabled else None
+        running_app.state.sweep_task = sweep
         try:
             async with mcp.session_manager.run():
                 yield
         finally:
+            if sweep is not None:
+                sweep.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await sweep
             store.close()
 
     app = FastAPI(
@@ -180,6 +196,7 @@ def create_app(
     )
     app.state.service = service
     app.state.prs = prs
+    app.state.sweeper = sweeper
     app.state.mcp = mcp
 
     app.add_middleware(

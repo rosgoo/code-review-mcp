@@ -16,9 +16,17 @@ class ConfigError(ReviewError):
 
 
 @dataclass(frozen=True)
+class CleanupConfig:
+    enabled: bool = True
+    interval_minutes: float = 15.0
+    idle_days: float = 7.0
+
+
+@dataclass(frozen=True)
 class RepoConfig:
     default_repo: str | None = None
     repos: Mapping[str, Path] = field(default_factory=dict)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
 
     def clone_path(self, repo: str) -> Path | None:
         """Return the mapped local clone for `repo` (compared case-insensitively), or None."""
@@ -43,11 +51,34 @@ def _require_repo_name(value: object, where: str) -> str:
     return value
 
 
+def _positive_number(table: Mapping[str, object], key: str, default: float, where: str) -> float:
+    value = table.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+        raise ConfigError(f"{key} in {where} must be a positive number, got {value!r}")
+    return float(value)
+
+
+def _load_cleanup(data: Mapping[str, object], path: Path) -> CleanupConfig:
+    table = data.get("cleanup", {})
+    if not isinstance(table, dict):
+        raise ConfigError(f"[cleanup] in {path} must be a table")
+    where = f"[cleanup] in {path}"
+    enabled = table.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError(f"enabled in {where} must be true or false, got {enabled!r}")
+    return CleanupConfig(
+        enabled=enabled,
+        interval_minutes=_positive_number(table, "interval_minutes", 15.0, where),
+        idle_days=_positive_number(table, "idle_days", 7.0, where),
+    )
+
+
 def load_repo_config(home: Path) -> RepoConfig:
     """Read `<home>/config.toml`. A missing file gives an empty config.
 
-    Keys: `default_repo = "owner/name"` and a `[repos]` table of `"owner/name" = "<clone path>"`
-    (`~` is expanded; paths must be absolute). Other keys are ignored.
+    Keys: `default_repo = "owner/name"`, a `[repos]` table of `"owner/name" = "<clone path>"`
+    (`~` is expanded; paths must be absolute), and a `[cleanup]` table with `enabled`,
+    `interval_minutes`, and `idle_days`. Other keys are ignored.
     Raises ConfigError if the file cannot be read or parsed, or a value is invalid.
     """
     path = home / CONFIG_FILENAME
@@ -75,4 +106,4 @@ def load_repo_config(home: Path) -> RepoConfig:
         if not clone_path.is_absolute():
             raise ConfigError(f"[repos] {repo!r} in {path} must be absolute or start with ~")
         repos[repo] = clone_path
-    return RepoConfig(default_repo=default_repo, repos=repos)
+    return RepoConfig(default_repo=default_repo, repos=repos, cleanup=_load_cleanup(data, path))

@@ -109,6 +109,10 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (review_id, path, head_sha)
     );
     """,
+    """
+    ALTER TABLE reviews ADD COLUMN last_activity_at TEXT;
+    UPDATE reviews SET last_activity_at = updated_at;
+    """,
 ]
 
 
@@ -143,6 +147,7 @@ class ReviewRow:
     pr_body: str | None
     pr_state: str | None
     is_draft: bool
+    last_activity_at: str | None
 
 
 @dataclass(frozen=True)
@@ -166,6 +171,12 @@ class PrReviewFields:
 class PrKey(NamedTuple):
     repo: str
     pr_number: int
+
+
+@dataclass(frozen=True)
+class WorktreeCounts:
+    count: int
+    released: int
 
 
 @dataclass(frozen=True)
@@ -221,6 +232,15 @@ def new_id() -> str:
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def timestamp(moment: datetime) -> str:
+    return moment.astimezone(UTC).isoformat(timespec="microseconds")
+
+
+def parse_timestamp(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _review_from_row(row: sqlite3.Row) -> ReviewRow:
@@ -411,6 +431,51 @@ class Store:
             (utc_now(), review_id),
         )
 
+    def record_activity(self, review_id: str, at: str, *, unless_since: str) -> None:
+        """Set the review's last activity time to `at`, unless it is already `unless_since`
+        or later."""
+        self._conn.execute(
+            "UPDATE reviews SET last_activity_at = ?"
+            " WHERE id = ? AND (last_activity_at IS NULL OR last_activity_at < ?)",
+            (at, review_id, unless_since),
+        )
+
+    def latest_thread_update(self, review_id: str) -> str | None:
+        latest: str | None = self._conn.execute(
+            "SELECT MAX(updated_at) FROM threads WHERE review_id = ?", (review_id,)
+        ).fetchone()[0]
+        return latest
+
+    def pr_reviews_with_worktrees(self) -> list[ReviewRow]:
+        """PR reviews that are not closed and hold a worktree, ordered by repo and number."""
+        rows = self._conn.execute(
+            "SELECT * FROM reviews"
+            " WHERE kind = 'pr' AND status != 'closed' AND worktree_path IS NOT NULL"
+            " ORDER BY repo, pr_number"
+        ).fetchall()
+        return [_review_from_row(row) for row in rows]
+
+    def set_worktree(self, review_id: str, worktree_path: str, merge_base_sha: str) -> None:
+        self._conn.execute(
+            "UPDATE reviews SET worktree_path = ?, merge_base_sha = ? WHERE id = ?",
+            (worktree_path, merge_base_sha, review_id),
+        )
+
+    def release_worktree(self, review_id: str) -> None:
+        """Clear the review's worktree path. The review stays in its status."""
+        self._conn.execute("UPDATE reviews SET worktree_path = NULL WHERE id = ?", (review_id,))
+
+    def set_pr_state(self, review_id: str, pr_state: str) -> None:
+        self._conn.execute("UPDATE reviews SET pr_state = ? WHERE id = ?", (pr_state, review_id))
+
+    def worktree_counts(self) -> WorktreeCounts:
+        """Count PR reviews that are not closed: those with a worktree and those released."""
+        row = self._conn.execute(
+            "SELECT COUNT(worktree_path), COUNT(*) - COUNT(worktree_path) FROM reviews"
+            " WHERE kind = 'pr' AND status != 'closed'"
+        ).fetchone()
+        return WorktreeCounts(count=row[0], released=row[1])
+
     def set_file_viewed(self, review_id: str, path: str, head_sha: str, viewed: bool) -> None:
         if viewed:
             self._conn.execute(
@@ -551,10 +616,19 @@ class Store:
         )
 
     def delete_draft_thread(self, thread_id: str) -> bool:
-        """Delete the thread and its messages if its status is draft. Returns whether it did."""
-        cursor = self._conn.execute(
-            "DELETE FROM threads WHERE id = ? AND status = 'draft'", (thread_id,)
-        )
+        """Delete the thread and its messages if its status is draft. Returns whether it did.
+
+        A deletion counts as activity on the thread's review.
+        """
+        with self._transaction():
+            self._conn.execute(
+                "UPDATE reviews SET last_activity_at = ?"
+                " WHERE id = (SELECT review_id FROM threads WHERE id = ? AND status = 'draft')",
+                (timestamp(datetime.now(UTC)), thread_id),
+            )
+            cursor = self._conn.execute(
+                "DELETE FROM threads WHERE id = ? AND status = 'draft'", (thread_id,)
+            )
         return cursor.rowcount > 0
 
     def move_threads(

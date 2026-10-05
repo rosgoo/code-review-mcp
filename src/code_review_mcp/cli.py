@@ -1,4 +1,5 @@
 import argparse
+import logging
 import sys
 from collections.abc import Sequence
 
@@ -34,6 +35,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = load_settings(port=args.port, host=args.host)
     except ValueError as e:
         parser.error(f"invalid CODE_REVIEW_MCP_PORT: {e}")
+
+    log_handler = logging.StreamHandler()
+    log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    app_logger = logging.getLogger("code_review_mcp")
+    app_logger.addHandler(log_handler)
+    app_logger.setLevel(logging.INFO)
+    app_logger.propagate = False
 
     store = Store.open(settings.db_path)
     print(f"code-review-mcp: state in {settings.db_path}", file=sys.stderr)

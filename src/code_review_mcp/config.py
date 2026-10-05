@@ -16,6 +16,7 @@ class Settings:
     host: str
     port: int
     open_browser: bool
+    cleanup_enabled: bool = True
 
     @property
     def db_path(self) -> Path:
@@ -34,16 +35,19 @@ def load_settings(port: int | None = None, host: str | None = None) -> Settings:
     """Build settings from explicit arguments, then environment variables, then defaults.
 
     Environment: CODE_REVIEW_MCP_HOME (data dir), CODE_REVIEW_MCP_PORT,
-    CODE_REVIEW_MCP_BROWSER ("0", "false", "no" or "off" disables opening a browser).
+    CODE_REVIEW_MCP_BROWSER ("0", "false", "no" or "off" disables opening a browser),
+    CODE_REVIEW_MCP_CLEANUP (the same values disable the worktree cleanup task).
     Raises ValueError if CODE_REVIEW_MCP_PORT is not an integer.
     """
     home = Path(os.environ.get("CODE_REVIEW_MCP_HOME") or DEFAULT_HOME).expanduser()
     if port is None:
         port = int(os.environ.get("CODE_REVIEW_MCP_PORT") or DEFAULT_PORT)
     browser_flag = os.environ.get("CODE_REVIEW_MCP_BROWSER", "1").strip().lower()
+    cleanup_flag = os.environ.get("CODE_REVIEW_MCP_CLEANUP", "1").strip().lower()
     return Settings(
         home=home,
         host=host or DEFAULT_HOST,
         port=port,
         open_browser=browser_flag not in _FALSE_VALUES,
+        cleanup_enabled=cleanup_flag not in _FALSE_VALUES,
     )

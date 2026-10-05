@@ -510,3 +510,62 @@ def _validate[T](adapter: TypeAdapter[T], raw: bytes) -> T:
         return adapter.validate_json(raw)
     except ValidationError as e:
         raise GitHubError(f"Unexpected output from gh: {e}") from e
+
+
+class _GhStateNode(_GhModel):
+    state: str
+
+
+class _GhStatesData(_GhModel):
+    repository: dict[str, _GhStateNode | None] | None
+
+
+class _GhStatesResponse(_GhModel):
+    data: _GhStatesData
+
+
+_PR_STATES = TypeAdapter(_GhStatesResponse)
+
+
+async def fetch_pr_states(
+    client: GitHubClient, repo: str, numbers: Sequence[int]
+) -> dict[int, str]:
+    """Return the lowercase state ("open", "closed", "merged") of each PR of `repo`.
+
+    Uses one GraphQL request for all `numbers`. A PR that GitHub cannot resolve is left out,
+    and the other PRs still return. Raises GitHubError if the request returns no data.
+    """
+    if not numbers:
+        return {}
+    owner, name = repo.split("/", 1)
+    fields = " ".join(f"pr{n}: pullRequest(number: {n}) {{ state }}" for n in sorted(set(numbers)))
+    query = (
+        "query($owner: String!, $name: String!) "
+        f"{{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
+    )
+    result = await client._runner(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={query}",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+        ],
+        timeout=GH_TIMEOUT_SECONDS,
+        env=_GH_ENV,
+    )
+    try:
+        response = _PR_STATES.validate_json(result.stdout)
+    except ValidationError as e:
+        detail = result.describe_failure() if not result.ok else f"Unexpected output from gh: {e}"
+        raise GitHubError(detail) from e
+    repository = response.data.repository or {}
+    return {
+        int(alias.removeprefix("pr")): node.state.lower()
+        for alias, node in repository.items()
+        if node is not None and alias.startswith("pr") and alias[2:].isdigit()
+    }

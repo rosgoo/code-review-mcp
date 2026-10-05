@@ -98,6 +98,20 @@ A repo without a `[repos]` entry gets a blobless clone in `<data dir>/clones/<ow
 
 Each PR review gets one detached worktree at `<data dir>/worktrees/<owner>-<name>-<number>`, checked out at the PR head. Fetches write only `refs/code-review-mcp/pull/<n>/head` and `.../base`. They do not move branches, tags, `origin/*`, or `FETCH_HEAD`. Every git command runs with `core.hooksPath=/dev/null`, so the clone's hooks do not run. A Maybern worktree takes about 650 MB and 10 s to create.
 
+The daemon frees worktrees on its own. A sweep runs 30 s after startup, then every `interval_minutes`:
+
+- A review of a merged or closed PR is closed: its worktree and refs go, and its threads and viewed state stay. A review with activity in the last 60 minutes is kept.
+- A review of an open PR with no activity for `idle_days` releases its worktree and stays open. The next read of the review restores the worktree at the same head, which takes a few seconds.
+
+Activity is an open, a refresh, a PR or file read (REST or `get_review`), a viewed change, or a thread change. Each removal, release, and restore goes to the daemon log. `CODE_REVIEW_MCP_CLEANUP=0` turns the sweep off.
+
+```toml
+[cleanup]
+enabled = true          # default
+interval_minutes = 15   # default
+idle_days = 7           # default
+```
+
 | Tool | What it does |
 |---|---|
 | `list_review_requests(refresh=False)` | Open PRs that request your review, as `direct` (you by name) and `team` (only a team you are in); up to 100 each, newest first, cached 60 s |
@@ -122,7 +136,7 @@ Code: `github.py` (`gh` calls, ref parsing), `worktrees.py` (git), `pr_service.p
 
 | Route | Purpose |
 |---|---|
-| `GET /api/health` | Liveness and schema version |
+| `GET /api/health` | Liveness, schema version, and `worktrees: {count, released}` |
 | `GET /api/reviews` | Reviews, newest first |
 | `GET /api/reviews/{id}/view` | Mode, title, diff or files. An `open_diff` review with `working_dir` also returns the diff and, per file, `old_content` rebuilt from it (`null` when the file on disk no longer matches the diff) |
 | `GET /api/reviews/{id}/comments` | All comments (any status) |

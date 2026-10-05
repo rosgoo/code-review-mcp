@@ -19,7 +19,11 @@ COMMENT = {
 async def test_health(client: httpx.AsyncClient) -> None:
     response = await client.get("/api/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "schema_version": 2}
+    assert response.json() == {
+        "status": "ok",
+        "schema_version": 3,
+        "worktrees": {"count": 0, "released": 0},
+    }
 
 
 async def test_list_reviews_newest_first(

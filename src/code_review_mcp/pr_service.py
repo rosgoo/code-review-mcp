@@ -1,7 +1,9 @@
 import asyncio
+import logging
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
@@ -11,8 +13,24 @@ from code_review_mcp.github import GitHubClient, PullRequest, ReviewRequest, Sta
 from code_review_mcp.hub import ReviewHub
 from code_review_mcp.local_files import detect_language
 from code_review_mcp.repo_config import RepoConfig, load_repo_config
-from code_review_mcp.store import PrKey, PrReviewFields, ReviewRow, Store, utc_now
+from code_review_mcp.store import (
+    PrKey,
+    PrReviewFields,
+    ReviewRow,
+    Store,
+    parse_timestamp,
+    timestamp,
+    utc_now,
+)
 from code_review_mcp.worktrees import BlobContent, ChangedFile, WorktreeManager
+
+logger = logging.getLogger(__name__)
+
+ACTIVITY_WRITE_INTERVAL = timedelta(seconds=60)
+
+
+def _utc_clock() -> datetime:
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True)
@@ -90,6 +108,8 @@ class PrService:
         github: GitHubClient,
         worktrees: WorktreeManager,
         config_loader: Callable[[], RepoConfig] | None = None,
+        *,
+        clock: Callable[[], datetime] = _utc_clock,
     ) -> None:
         self._store = store
         self._hub = hub
@@ -100,9 +120,24 @@ class PrService:
         self._live: dict[str, _LiveMetadata] = {}
         self._locks: dict[PrKey, asyncio.Lock] = {}
         self._diff_cache: dict[_DiffKey, list[ChangedFile]] = {}
+        self._clock = clock
 
     def _lock(self, repo: str, number: int) -> asyncio.Lock:
         return self._locks.setdefault(PrKey(repo, number), asyncio.Lock())
+
+    def _record_activity(self, review_id: str) -> None:
+        now = self._clock()
+        self._store.record_activity(
+            review_id, timestamp(now), unless_since=timestamp(now - ACTIVITY_WRITE_INTERVAL)
+        )
+
+    def last_activity(self, review: ReviewRow) -> datetime:
+        """The later of the review's recorded activity and its latest thread change."""
+        stamps = [review.last_activity_at or review.updated_at]
+        thread_update = self._store.latest_thread_update(review.id)
+        if thread_update is not None:
+            stamps.append(thread_update)
+        return max(parse_timestamp(stamp) for stamp in stamps)
 
     def _require_pr_review(self, review_id: str) -> ReviewRow:
         review = self._store.get_review(review_id)
@@ -112,24 +147,53 @@ class PrService:
             raise ReviewError(f"Review {review_id!r} is not a PR review")
         return review
 
-    def _require_open_pr(self, review_id: str) -> _OpenPr:
+    async def _ready_pr(self, review_id: str) -> _OpenPr:
+        """Return the open PR review with a usable worktree, restoring the worktree first if it
+        was released or its directory is missing."""
         review = self._require_pr_review(review_id)
         if review.status == "closed":
             raise ReviewError(f"Review {review_id!r} is closed. Open the PR again to reload it.")
+        if review.worktree_path is None or not Path(review.worktree_path).is_dir():
+            review = await self._restore(review)
         if review.worktree_path is None or review.head_sha is None or not review.merge_base_sha:
             raise ReviewError(f"Review {review_id!r} has no worktree yet. Open the PR again.")
-        repo_dir = Path(review.worktree_path)
-        if not repo_dir.is_dir():
-            raise ReviewError(
-                f"The worktree of review {review_id!r} is missing. "
-                "Refresh the review to recreate it."
-            )
         return _OpenPr(
             review=review,
-            repo_dir=repo_dir,
+            repo_dir=Path(review.worktree_path),
             head_sha=review.head_sha,
             merge_base_sha=review.merge_base_sha,
         )
+
+    async def _restore(self, review: ReviewRow) -> ReviewRow:
+        """Re-create the review's worktree at its stored head. Concurrent callers share one
+        restore through the PR lock."""
+        assert review.repo is not None and review.pr_number is not None
+        async with self._lock(review.repo, review.pr_number):
+            current = self._require_pr_review(review.id)
+            if current.status == "closed":
+                raise ReviewError(
+                    f"Review {review.id!r} is closed. Open the PR again to reload it."
+                )
+            if current.worktree_path is not None and Path(current.worktree_path).is_dir():
+                return current
+            if current.base_ref is None or current.base_sha is None or current.head_sha is None:
+                raise ReviewError(f"Review {review.id!r} has no stored head. Open the PR again.")
+            prepared = await self._worktrees.prepare(
+                review.repo,
+                review.pr_number,
+                mapped_clone=self._config_loader().clone_path(review.repo),
+                base_ref=current.base_ref,
+                base_sha=current.base_sha,
+                head_sha=current.head_sha,
+            )
+            self._store.set_worktree(review.id, str(prepared.path), prepared.merge_base_sha)
+            logger.info(
+                "restored worktree of %s#%d at %s",
+                review.repo,
+                review.pr_number,
+                current.head_sha[:12],
+            )
+            return self._require_pr_review(review.id)
 
     async def inbox(self, *, refresh: bool = False) -> dict[str, object]:
         """Review requests split into `direct` (the user by name) and `team` (only a team)."""
@@ -214,6 +278,7 @@ class PrService:
                 )
             )
             self._live[review.id] = _LiveMetadata(pr=pr, fetched_at=utc_now())
+            self._record_activity(review.id)
         old_head = previous.head_sha if previous is not None else None
         moved = old_head is not None and old_head != prepared.head_sha
         if moved:
@@ -250,9 +315,11 @@ class PrService:
         opened or refreshed since the daemon started.
         """
         review = self._require_pr_review(review_id)
+        self._record_activity(review_id)
         files: list[dict[str, object]] = []
-        if review.status != "closed" and review.worktree_path and review.merge_base_sha:
-            pr = self._require_open_pr(review_id)
+        if review.status != "closed":
+            pr = await self._ready_pr(review_id)
+            review = pr.review
             viewed = self._store.viewed_paths(review_id, pr.head_sha)
             files = [
                 _serialize_changed_file(f, f.path in viewed) for f in await self._changed_files(pr)
@@ -288,7 +355,9 @@ class PrService:
         Contents are null when a side does not exist, or when the file is binary or too large.
         Raises NotFoundError if `path` is not a changed file of the PR.
         """
-        pr = self._require_open_pr(review_id)
+        self._require_pr_review(review_id)
+        self._record_activity(review_id)
+        pr = await self._ready_pr(review_id)
         changed = await self._require_changed_file(pr, path)
         old: BlobContent | None = None
         new: BlobContent | None = None
@@ -323,7 +392,9 @@ class PrService:
 
     async def set_viewed(self, review_id: str, path: str, viewed: bool) -> dict[str, object]:
         """Mark or unmark a changed file as viewed at the review's current head SHA."""
-        pr = self._require_open_pr(review_id)
+        self._require_pr_review(review_id)
+        self._record_activity(review_id)
+        pr = await self._ready_pr(review_id)
         await self._require_changed_file(pr, path)
         self._store.set_file_viewed(review_id, path, pr.head_sha, viewed)
         return {"path": path, "viewed": viewed, "head_sha": pr.head_sha}
@@ -335,14 +406,56 @@ class PrService:
         """
         review = self._require_pr_review(review_id)
         assert review.repo is not None and review.pr_number is not None
-        config = self._config_loader()
         async with self._lock(review.repo, review.pr_number):
+            await self._close_locked(review)
+
+    async def _close_locked(self, review: ReviewRow) -> None:
+        assert review.repo is not None and review.pr_number is not None
+        await self._worktrees.remove(
+            review.repo,
+            review.pr_number,
+            mapped_clone=self._config_loader().clone_path(review.repo),
+        )
+        self._store.close_pr_review(review.id)
+        self._live.pop(review.id, None)
+        self._hub.publish(review.id, "review_closed")
+
+    async def close_if_inactive(self, review_id: str, active_after: datetime) -> bool:
+        """Close the review (see close) unless it is already closed or has activity after
+        `active_after`. Returns whether it closed the review."""
+        review = self._require_pr_review(review_id)
+        assert review.repo is not None and review.pr_number is not None
+        async with self._lock(review.repo, review.pr_number):
+            current = self._require_pr_review(review_id)
+            if current.status == "closed" or self.last_activity(current) > active_after:
+                return False
+            await self._close_locked(current)
+        return True
+
+    async def release_if_inactive(self, review_id: str, active_after: datetime) -> bool:
+        """Remove the review's worktree and namespaced refs but keep the review open, unless it
+        is closed, holds no worktree, or has activity after `active_after`.
+
+        A later read of the review restores the worktree at the same head.
+        Returns whether it released the worktree.
+        """
+        review = self._require_pr_review(review_id)
+        assert review.repo is not None and review.pr_number is not None
+        async with self._lock(review.repo, review.pr_number):
+            current = self._require_pr_review(review_id)
+            if (
+                current.status == "closed"
+                or current.worktree_path is None
+                or self.last_activity(current) > active_after
+            ):
+                return False
             await self._worktrees.remove(
-                review.repo, review.pr_number, mapped_clone=config.clone_path(review.repo)
+                review.repo,
+                review.pr_number,
+                mapped_clone=self._config_loader().clone_path(review.repo),
             )
-            self._store.close_pr_review(review_id)
-        self._live.pop(review_id, None)
-        self._hub.publish(review_id, "review_closed")
+            self._store.release_worktree(review_id)
+        return True
 
     async def get_review(self, review_id: str) -> dict[str, object]:
         """The PR view plus a summary of the review's threads."""

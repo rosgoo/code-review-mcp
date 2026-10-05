@@ -287,16 +287,14 @@ async def test_get_review_includes_threads(prs: PrService, store: Store) -> None
     assert summary["worktree_path"]
 
 
-async def test_missing_worktree_is_reported_and_refresh_recreates_it(
-    prs: PrService, settings: Settings
+async def test_missing_worktree_is_restored_on_read(
+    prs: PrService, settings: Settings, pr_repo: PrRepo
 ) -> None:
     review_id = (await prs.open_pr(PR_URL)).review.id
     worktree = settings.home / "worktrees" / "acme-widgets-1"
     shutil.rmtree(worktree)
 
-    with pytest.raises(ReviewError, match="worktree .* is missing"):
-        await prs.get_file(review_id, "app.py")
-    refreshed = await prs.refresh(review_id)
+    file = await prs.get_file(review_id, "app.py")
 
-    assert refreshed.head_moved is False
-    assert (await prs.get_file(review_id, "app.py"))["new_content"] == APP_V2
+    assert file["new_content"] == APP_V2
+    assert git(worktree, "rev-parse", "HEAD") == pr_repo.head_sha

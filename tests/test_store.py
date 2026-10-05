@@ -14,6 +14,7 @@ from code_review_mcp.store import (
     SchemaVersionError,
     Store,
     ThreadStatus,
+    WorktreeCounts,
 )
 
 SUBMITTED: tuple[ThreadStatus, ...] = ("submitted",)
@@ -45,6 +46,7 @@ EXPECTED_COLUMNS = {
         "pr_body",
         "pr_state",
         "is_draft",
+        "last_activity_at",
     },
     "review_files": {
         "review_id",
@@ -322,7 +324,7 @@ def test_migration_2_upgrades_a_version_1_database(tmp_path: Path) -> None:
 
     store = Store.open(db_path)
     try:
-        assert store.schema_version == 2
+        assert store.schema_version == len(MIGRATIONS)
         local = store.get_review("local1")
         assert local is not None
         assert (local.title, local.patch_text, local.is_draft) == ("Local one", "d", False)
@@ -398,3 +400,99 @@ def test_viewed_files(store: Store) -> None:
     assert store.viewed_paths(review.id, "h3") == set()
     with pytest.raises(sqlite3.IntegrityError):
         store.set_file_viewed("no-such-review", "a.py", "h1", True)
+
+
+def test_migration_3_backfills_last_activity(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        f"BEGIN;\n{MIGRATIONS[0]}\n{MIGRATIONS[1]}\nPRAGMA user_version = 2;\nCOMMIT;"
+    )
+    conn.execute(
+        "INSERT INTO reviews (id, kind, title, created_at, updated_at)"
+        " VALUES ('old', 'local', 'Old', '2026-01-01T00:00:00+00:00', '2026-02-01T00:00:00+00:00')"
+    )
+    conn.commit()
+    conn.close()
+
+    store = Store.open(db_path)
+    try:
+        review = store.get_review("old")
+        assert store.schema_version == 3
+        assert review is not None
+        assert review.last_activity_at == "2026-02-01T00:00:00+00:00"
+    finally:
+        store.close()
+
+
+def test_activity_release_and_counts(store: Store) -> None:
+    review = store.upsert_pr_review(PR_FIELDS)
+    other = store.upsert_pr_review(replace(PR_FIELDS, pr_number=8))
+    closed = store.upsert_pr_review(replace(PR_FIELDS, pr_number=9))
+    store.close_pr_review(closed.id)
+
+    store.record_activity(
+        review.id,
+        "2026-10-05T10:00:00.000000+00:00",
+        unless_since="2026-10-05T09:59:00.000000+00:00",
+    )
+    store.record_activity(
+        review.id,
+        "2026-10-05T10:00:30.000000+00:00",
+        unless_since="2026-10-05T09:59:30.000000+00:00",
+    )
+    throttled = store.get_review(review.id)
+    store.record_activity(
+        review.id,
+        "2026-10-05T10:02:00.000000+00:00",
+        unless_since="2026-10-05T10:01:00.000000+00:00",
+    )
+    moved = store.get_review(review.id)
+
+    assert (
+        throttled is not None and throttled.last_activity_at == "2026-10-05T10:00:00.000000+00:00"
+    )
+    assert moved is not None and moved.last_activity_at == "2026-10-05T10:02:00.000000+00:00"
+    assert [r.id for r in store.pr_reviews_with_worktrees()] == [review.id, other.id]
+    assert store.worktree_counts() == WorktreeCounts(count=2, released=0)
+
+    store.release_worktree(other.id)
+    store.set_pr_state(other.id, "merged")
+    released = store.get_review(other.id)
+
+    assert released is not None
+    assert (released.status, released.worktree_path, released.pr_state) == ("open", None, "merged")
+    assert released.updated_at == other.updated_at
+    assert [r.id for r in store.pr_reviews_with_worktrees()] == [review.id]
+    assert store.worktree_counts() == WorktreeCounts(count=1, released=1)
+
+    store.set_worktree(other.id, "/wt/o-r-8", "c" * 40)
+    restored = store.get_review(other.id)
+    assert restored is not None
+    assert (restored.worktree_path, restored.merge_base_sha) == ("/wt/o-r-8", "c" * 40)
+    assert store.worktree_counts() == WorktreeCounts(count=2, released=0)
+
+
+def test_thread_activity(store: Store) -> None:
+    review = store.upsert_pr_review(PR_FIELDS)
+    assert store.latest_thread_update(review.id) is None
+    thread = store.create_thread(
+        review_id=review.id,
+        kind="review_comment",
+        path="a.py",
+        side="additions",
+        line=1,
+        status="draft",
+        author="user",
+        body="draft",
+    )
+    store._conn.execute(
+        "UPDATE reviews SET last_activity_at = '2000-01-01' WHERE id = ?", (review.id,)
+    )
+
+    assert store.latest_thread_update(review.id) == thread.updated_at
+    assert store.delete_draft_thread(thread.id) is True
+    deleted = store.get_review(review.id)
+    assert deleted is not None and deleted.last_activity_at is not None
+    assert deleted.last_activity_at > "2026"
+    assert store.latest_thread_update(review.id) is None
