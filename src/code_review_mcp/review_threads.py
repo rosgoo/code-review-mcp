@@ -227,7 +227,6 @@ class ThreadService:
                 f"{event} is not allowed here: the author of a PR can only COMMENT on it. "
                 f"Allowed: {', '.join(allowed)}."
             )
-        check_review_body(event, body)
         async with self._prs.lock_for(review.repo, review.pr_number):
             current = self._prs.require_pr_review(review_id)
             head = current.head_sha
@@ -259,6 +258,7 @@ class ThreadService:
                 for t in threads
                 if t.status == "draft"
             ]
+            check_review_body(event, body, comment_count=len(drafts))
             submitted = await self._writer.submit_review(
                 review.repo,
                 review.pr_number,

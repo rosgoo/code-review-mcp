@@ -7,7 +7,6 @@ from code_review_mcp.worktrees import Hunk
 
 ALL_EVENTS: tuple[SubmissionEvent, ...] = ("COMMENT", "APPROVE", "REQUEST_CHANGES")
 AUTHOR_EVENTS: tuple[SubmissionEvent, ...] = ("COMMENT",)
-BODY_REQUIRED_EVENTS: frozenset[SubmissionEvent] = frozenset({"COMMENT", "REQUEST_CHANGES"})
 FILE_LEVEL_LINE = 0
 
 
@@ -33,10 +32,23 @@ def allowed_events(viewer_login: str, pr_author: str | None) -> list[SubmissionE
     return list(AUTHOR_EVENTS if is_author(viewer_login, pr_author) else ALL_EVENTS)
 
 
-def check_review_body(event: SubmissionEvent, body: str) -> None:
-    """GitHub requires a review body for COMMENT and REQUEST_CHANGES. Raises ReviewError."""
-    if event in BODY_REQUIRED_EVENTS and not body.strip():
-        raise ReviewError(f"A {event} review needs a body. Write a summary, then submit again.")
+def check_review_body(event: SubmissionEvent, body: str, *, comment_count: int) -> None:
+    """Raise ReviewError unless GitHub accepts this review's body.
+
+    REQUEST_CHANGES needs a body. COMMENT needs a body or at least one comment (GitHub
+    accepts a COMMENT review with inline comments and no body). APPROVE needs neither.
+    """
+    if body.strip():
+        return
+    if event == "REQUEST_CHANGES":
+        raise ReviewError(
+            "A REQUEST_CHANGES review needs a body. Write a summary, then submit again."
+        )
+    if event == "COMMENT" and comment_count == 0:
+        raise ReviewError(
+            "A COMMENT review needs a body or at least one comment. Write a summary or add a "
+            "comment, then submit again."
+        )
 
 
 def normalize_anchor(

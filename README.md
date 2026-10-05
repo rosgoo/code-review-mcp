@@ -142,7 +142,7 @@ A PR review holds draft review comments until you submit them as one GitHub revi
 - A comment is on one line, a range of lines, or the whole file (`line: 0`). A line comment must be inside a diff hunk: GitHub rejects other lines. `GET /api/reviews/{id}/file` lists the commentable ranges per side.
 - `additions` is GitHub's `RIGHT` side and `deletions` is `LEFT`.
 - When the PR head moves, a draft on a file whose diff did not change follows the new head. Every other draft becomes `stale`. A stale comment must be moved (`PATCH` with a new position) or deleted before submit.
-- Submit posts one review on the current head: it creates a pending review with the line comments, adds each file comment, and submits the review as `COMMENT`, `APPROVE`, or `REQUEST_CHANGES`. If a step fails, the pending review is deleted and nothing is marked posted. On your own PR, GitHub allows only `COMMENT`. `COMMENT` and `REQUEST_CHANGES` need a body.
+- Submit posts one review on the current head: it creates a pending review with the line comments, adds each file comment, and submits the review as `COMMENT`, `APPROVE`, or `REQUEST_CHANGES`. If a step fails, the pending review is deleted and nothing is marked posted. On your own PR, GitHub allows only `COMMENT`. `REQUEST_CHANGES` needs a body. `COMMENT` needs a body or at least one comment.
 
 | Route | Purpose |
 |---|---|

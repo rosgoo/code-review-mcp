@@ -173,6 +173,18 @@ async def test_writer_creates_pending_adds_file_comments_and_submits() -> None:
     assert events == {"event": "COMMENT", "body": "summary"}
 
 
+async def test_writer_leaves_out_a_blank_body() -> None:
+    fake = FakeGh()
+    fake.on("POST", REVIEWS, stdout=_review(43, "PENDING"))
+    fake.on(f"{REVIEWS}/43/events", stdout=_review(43, "APPROVED"))
+
+    await GitHubReviewWriter(fake).submit_review(
+        "o/r", 7, commit_id="abc", event="APPROVE", body=" ", comments=[]
+    )
+
+    assert json.loads(fake.stdins_with(f"{REVIEWS}/43/events")[0] or b"") == {"event": "APPROVE"}
+
+
 async def test_writer_deletes_the_pending_review_when_a_later_step_fails() -> None:
     fake = FakeGh()
     fake.on("POST", REVIEWS, stdout=_review(42, "PENDING"))

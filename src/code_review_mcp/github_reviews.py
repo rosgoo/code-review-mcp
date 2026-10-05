@@ -224,8 +224,9 @@ class GitHubReviewWriter:
         """Post one review of `commit_id` with every comment, then submit it as `event`.
 
         Creates a pending review with the line comments, adds each file comment to it, and
-        submits it. If a step after the first fails, the pending review is deleted, so
-        nothing stays on GitHub. Raises GitHubRequestError with GitHub's message.
+        submits it, with no body field when `body` is blank. If a step after the first fails,
+        the pending review is deleted, so nothing stays on GitHub. Raises GitHubRequestError
+        with GitHub's message.
         """
         reviews = f"repos/{repo}/pulls/{number}/reviews"
         pending = _validate(
@@ -240,7 +241,7 @@ class GitHubReviewWriter:
                 _REVIEW,
                 await self._api(
                     ["-X", "POST", f"{reviews}/{pending.id}/events"],
-                    {"event": event, "body": body},
+                    {"event": event, **({"body": body} if body.strip() else {})},
                 ),
             )
         except ReviewError as error:

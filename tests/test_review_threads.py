@@ -164,11 +164,14 @@ def test_rules() -> None:
     assert allowed_events("octocat", "OctoCat") == ["COMMENT"]
     assert allowed_events("reviewer", "octocat") == ["COMMENT", "APPROVE", "REQUEST_CHANGES"]
     assert allowed_events("reviewer", None) == ["COMMENT", "APPROVE", "REQUEST_CHANGES"]
-    for event in ("COMMENT", "REQUEST_CHANGES"):
-        with pytest.raises(ReviewError, match=f"A {event} review needs a body"):
-            check_review_body(event, "  \n")
-    check_review_body("APPROVE", "")
-    check_review_body("COMMENT", "fine")
+    with pytest.raises(ReviewError, match="A REQUEST_CHANGES review needs a body"):
+        check_review_body("REQUEST_CHANGES", "  \n", comment_count=3)
+    with pytest.raises(ReviewError, match="A COMMENT review needs a body or at least one comment"):
+        check_review_body("COMMENT", "  \n", comment_count=0)
+    check_review_body("COMMENT", "", comment_count=1)
+    check_review_body("COMMENT", "fine", comment_count=0)
+    check_review_body("REQUEST_CHANGES", "fix this", comment_count=0)
+    check_review_body("APPROVE", "", comment_count=0)
 
     assert normalize_anchor("deletions", 0, 4, "additions") == Anchor("additions", 0, None, None)
     assert normalize_anchor("additions", 5, 5, None) == Anchor("additions", 5, None, None)
@@ -435,15 +438,36 @@ async def test_github_422_maps_to_400_and_posts_nothing(
 async def test_body_rules_are_enforced_before_github(
     api: httpx.AsyncClient, review_id: str, fake_gh: FakeGh
 ) -> None:
-    await _create(api, review_id, SINGLE)
     url = f"/api/reviews/{review_id}/submit-review"
 
-    comment = await api.post(url, json={"event": "COMMENT", "body": ""})
+    no_comments = await api.post(url, json={"event": "COMMENT", "body": ""})
+    await _create(api, review_id, SINGLE)
     changes = await api.post(url, json={"event": "REQUEST_CHANGES", "body": " "})
     unknown = await api.post(url, json={"event": "MERGE", "body": "x"})
 
-    assert (comment.status_code, changes.status_code, unknown.status_code) == (400, 400, 422)
+    assert (no_comments.status_code, changes.status_code, unknown.status_code) == (
+        400,
+        400,
+        422,
+    )
+    assert "needs a body or at least one comment" in no_comments.json()["error"]
     assert not fake_gh.calls_with("POST", REVIEWS)
+
+
+async def test_comment_with_drafts_and_no_body_sends_no_body_field(
+    api: httpx.AsyncClient, review_id: str, fake_gh: FakeGh, store: Store
+) -> None:
+    await _create(api, review_id, SINGLE)
+    _github_accepts(fake_gh, [SINGLE])
+
+    response = await api.post(
+        f"/api/reviews/{review_id}/submit-review", json={"event": "COMMENT", "body": "  "}
+    )
+
+    assert response.status_code == 200, response.text
+    [events_stdin] = fake_gh.stdins_with(f"{REVIEWS}/900/events")
+    assert json.loads(events_stdin or b"") == {"event": "COMMENT"}
+    assert [t.status for t in store.list_threads(review_id)] == ["posted"]
 
 
 async def test_stale_thread_blocks_submit(
