@@ -130,22 +130,20 @@ def build_api_router(
 
     @router.delete("/threads/{thread_id}")
     async def delete_thread(thread_id: str) -> dict[str, object]:
-        service.delete_thread(thread_id)
+        thread = store.get_thread(thread_id)
+        if thread is not None and thread.kind == "question":
+            agents.delete_question(thread_id)
+        else:
+            service.delete_thread(thread_id)
         return {"deleted": True}
 
     @router.post("/threads/{thread_id}/reply")
     async def reply(thread_id: str, body: ReplyRequest) -> dict[str, object]:
         thread = store.get_thread(thread_id)
-        question = thread is not None and thread.kind == "question"
-        if question:
-            agents.require_on()
+        if thread is not None and thread.kind == "question":
+            staged = threads.stage_reply(thread_id, body.message)
+            return {"id": staged.id, "reopened": False, "status": staged.status}
         result = service.reply(thread_id, "user", body.message)
-        if question:
-            assert thread is not None
-            hub.publish(
-                thread.review_id, "thread_updated", {"thread": threads.thread_json(thread_id)}
-            )
-            agents.ask(thread_id)
         return {"id": result.message.id, "reopened": result.reopened}
 
     @router.get("/events")

@@ -78,8 +78,9 @@ EXPECTED_COLUMNS = {
         "updated_at",
         "github_comment_id",
         "github_url",
+        "agent_error",
     },
-    "messages": {"id", "thread_id", "author", "body", "created_at"},
+    "messages": {"id", "thread_id", "author", "body", "created_at", "status"},
     "submissions": {
         "id",
         "review_id",
@@ -564,3 +565,55 @@ def test_migration_4_adds_github_ids(tmp_path: Path) -> None:
     assert (posted.status, posted.github_comment_id) == ("posted", 77)
     assert recorded.commit_id == "c" * 40
     assert review is not None and review.last_reviewed_sha == "c" * 40
+
+
+def test_migration_6_marks_messages_sent_and_adds_agent_error(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        "BEGIN;\n" + "\n".join(MIGRATIONS[:5]) + "\nPRAGMA user_version = 5;\nCOMMIT;"
+    )
+    now = "2026-10-05T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO reviews (id, kind, title, created_at, updated_at)"
+        " VALUES ('r', 'pr', 'PR', ?, ?)",
+        (now, now),
+    )
+    conn.execute(
+        "INSERT INTO threads (id, review_id, kind, path, side, line, status, created_by,"
+        " created_at, updated_at) VALUES ('t', 'r', 'question', '', 'additions', 0,"
+        " 'submitted', 'user', ?, ?)",
+        (now, now),
+    )
+    conn.execute(
+        "INSERT INTO messages (id, thread_id, author, body, created_at)"
+        " VALUES ('m', 't', 'user', 'old question', ?)",
+        (now,),
+    )
+    conn.commit()
+    conn.close()
+
+    store = Store.open(db_path)
+    try:
+        [old] = store.list_messages("t")
+        migrated = store.get_thread("t")
+        staged = store.add_message("t", author="user", body="follow-up", status="staged")
+        store.restage_question("t", ["m"], status="draft", agent_error="skipped")
+        restaged = store.get_thread("t")
+        restaged_old = store.get_message("m")
+        store.mark_question_sent("t", ["m", staged.id])
+        sent = store.get_thread("t")
+        statuses = [m.status for m in store.list_messages("t")]
+        with pytest.raises(sqlite3.IntegrityError):
+            store._conn.execute("UPDATE messages SET status = 'draft' WHERE id = 'm'")
+        version = store.schema_version
+    finally:
+        store.close()
+    assert version == len(MIGRATIONS) == 6
+    assert (old.body, old.status) == ("old question", "sent")
+    assert migrated is not None and migrated.agent_error is None
+    assert staged.status == "staged"
+    assert restaged is not None and (restaged.status, restaged.agent_error) == ("draft", "skipped")
+    assert restaged_old is not None and restaged_old.status == "staged"
+    assert sent is not None and (sent.status, sent.agent_error) == ("submitted", None)
+    assert statuses == ["sent", "sent"]

@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from code_review_mcp.errors import (
@@ -59,8 +59,15 @@ def serialize_thread(thread: ThreadRow, messages: Sequence[MessageRow]) -> dict[
         "created_at": thread.created_at,
         "updated_at": thread.updated_at,
         "github_url": thread.github_url,
+        "agent_error": thread.agent_error,
         "messages": [
-            {"id": m.id, "author": m.author, "body": m.body, "created_at": m.created_at}
+            {
+                "id": m.id,
+                "author": m.author,
+                "body": m.body,
+                "created_at": m.created_at,
+                "status": m.status,
+            }
             for m in messages
         ],
     }
@@ -89,6 +96,15 @@ class ThreadService:
         self._prs = prs
         self._github = github
         self._writer = writer
+        self._staged_listeners: list[Callable[[str], None]] = []
+
+    def on_staged_change(self, listener: Callable[[str], None]) -> None:
+        """Call `listener(review_id)` after a question or follow-up is staged or removed."""
+        self._staged_listeners.append(listener)
+
+    def _staged_changed(self, review_id: str) -> None:
+        for listener in self._staged_listeners:
+            listener(review_id)
 
     def _thread_json(self, thread_id: str) -> dict[str, object]:
         thread = self._require_thread(thread_id)
@@ -172,11 +188,11 @@ class ThreadService:
     def create_question(
         self, review_id: str, path: str, request: AnchorRequest, body: str
     ) -> dict[str, object]:
-        """Create a question thread for the review agent, with status submitted.
+        """Stage a question for the review agent: a draft thread whose message is staged.
 
-        Any line may take a question. Line 0 is about the file, and path "" with line 0 is
-        about the whole PR. Raises ReviewError (400) for a local or closed review, a bad
-        position or path, or an empty body.
+        Nothing is sent until the review agent's send. Any line may take a question. Line 0
+        is about the file, and path "" with line 0 is about the whole PR. Raises ReviewError
+        (400) for a local or closed review, a bad position or path, or an empty body.
         """
         review = self._prs.require_pr_review(review_id)
         if review.status == "closed":
@@ -197,13 +213,62 @@ class ThreadService:
             line=anchor.line,
             start_line=anchor.start_line,
             start_side=anchor.start_side,
-            status="submitted",
+            status="draft",
             author="user",
             body=cleaned,
             anchor_sha=review.head_sha,
+            message_status="staged",
         )
         result = self._thread_json(thread.id)
         self._hub.publish(review_id, "thread_added", {"thread": result})
+        self._staged_changed(review_id)
+        return result
+
+    def _publish_updated(self, thread_id: str) -> dict[str, object]:
+        thread = self._require_thread(thread_id)
+        result = self._thread_json(thread_id)
+        self._hub.publish(thread.review_id, "thread_updated", {"thread": result})
+        return result
+
+    def stage_reply(self, thread_id: str, body: str) -> MessageRow:
+        """Stage a follow-up on a question thread. It is sent with the next agent send."""
+        thread = self._require_thread(thread_id)
+        if thread.kind != "question":
+            raise ReviewError(f"Thread {thread_id!r} is not a question thread")
+        review = self._prs.require_pr_review(thread.review_id)
+        if review.status == "closed":
+            raise ReviewError(f"Review {review.id!r} is closed. Open the PR again to ask.")
+        message = self._store.add_message(
+            thread_id, author="user", body=_clean_body(body), status="staged"
+        )
+        self._publish_updated(thread_id)
+        self._staged_changed(thread.review_id)
+        return message
+
+    def _require_staged_message(self, message_id: str) -> MessageRow:
+        message = self._store.get_message(message_id)
+        if message is None:
+            raise NotFoundError(f"Message {message_id!r} not found")
+        if message.status != "staged":
+            raise ConflictError(f"Message {message_id!r} was sent; only a staged one can change")
+        return message
+
+    def update_message(self, message_id: str, body: str) -> dict[str, object]:
+        """Edit a staged message. Returns the thread. Raises ConflictError if it was sent."""
+        message = self._require_staged_message(message_id)
+        self._store.update_message_body(message_id, _clean_body(body))
+        return self._publish_updated(message.thread_id)
+
+    def delete_message(self, message_id: str) -> dict[str, object]:
+        """Delete a staged follow-up. Returns the thread. A staged question is removed by
+        deleting its thread. Raises ConflictError if the message was sent or is the first."""
+        message = self._require_staged_message(message_id)
+        first = self._store.list_messages(message.thread_id)[0]
+        if first.id == message_id:
+            raise ConflictError("This message is the question itself; delete the thread instead")
+        self._store.delete_message(message_id)
+        result = self._publish_updated(message.thread_id)
+        self._staged_changed(self._require_thread(message.thread_id).review_id)
         return result
 
     def thread_json(self, thread_id: str) -> dict[str, object]:
@@ -218,6 +283,8 @@ class ThreadService:
         status does not allow the change.
         """
         thread = self._require_thread(thread_id)
+        if thread.kind == "question":
+            return self._update_question(thread, body=body, anchor=anchor)
         if thread.kind != REVIEW_COMMENT:
             raise ReviewError(f"Thread {thread_id!r} is not a review comment")
         if body is None and anchor is None:
@@ -253,6 +320,18 @@ class ThreadService:
         result = self._thread_json(thread_id)
         self._hub.publish(thread.review_id, "thread_updated", {"thread": result})
         return result
+
+    def _update_question(
+        self, thread: ThreadRow, *, body: str | None, anchor: AnchorRequest | None
+    ) -> dict[str, object]:
+        if anchor is not None or body is None:
+            raise ReviewError("Only the body of a staged question can change")
+        if thread.status != "draft":
+            raise ConflictError(
+                f"Thread {thread.id!r} was sent; only a staged question can be edited"
+            )
+        self._store.update_first_message(thread.id, _clean_body(body))
+        return self._publish_updated(thread.id)
 
     async def submit_review(
         self, review_id: str, event: SubmissionEvent, body: str

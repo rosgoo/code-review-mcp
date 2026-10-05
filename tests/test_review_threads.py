@@ -54,6 +54,7 @@ THREAD_KEYS = {
     "created_at",
     "updated_at",
     "github_url",
+    "agent_error",
     "messages",
 }
 SINGLE = {"path": "app.py", "side": "additions", "line": 2, "body": "why two?"}

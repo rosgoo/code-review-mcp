@@ -155,36 +155,50 @@ A PR review holds draft review comments until you submit them as one GitHub revi
 
 ## Ask the review agent
 
-A PR review can ask a built-in Claude agent questions. The daemon runs one Claude Agent SDK session per PR review, so the agent keeps every earlier question, answer, and file it read. Answers stream into the thread.
+A PR review can ask a built-in Claude agent questions. The daemon runs one Claude Agent SDK session per PR review, so the agent keeps every earlier question, answer, and file it read.
+
+Questions work like a GitHub review:
+
+1. A question on a line, a range, a file (`line: 0`), or the whole PR (`path: ""`, `line: 0`) is staged as a draft. A reply on a question thread is a staged follow-up. Staged items can be edited or deleted, and nothing goes to the agent yet.
+2. Send sends every staged item, or the threads you name, as one batch turn. A thread that still waits for an earlier answer stays staged until that answer arrives.
+3. In the batch turn the agent answers each item with the tool `answer_question(thread_id, answer)`. Each answer is stored in its thread when the agent gives it, and its text streams while the agent writes it. Text the agent writes outside the tool is logged and dropped, except in a one-item batch with no tool call, where that text is the answer.
+4. An item the agent skips or fails goes back to staged, and the thread's `agent_error` says why. A new send clears it.
+5. Stop interrupts the running batch and cancels the queued ones. Answered items keep their answers; the other items go back to staged. A daemon stop or restart also puts unanswered items back to staged, with an `agent_error`.
 
 - The agent runs in the review's worktree and is read-only. It can use Read, Grep, and Glob inside the worktree, and only `git log`, `git show`, `git diff`, and `git blame` in Bash. A gate denies every other tool, every path outside the worktree, and any shell operator. It loads the repo's `CLAUDE.md` but no repo hooks and no MCP servers.
 - Its only write is `draft_review_comment`, which saves a draft (`created_by: "agent"`) that you edit or delete. Nothing goes to GitHub until you submit.
 - Each turn tells the agent what changed since its last turn: review comments, threads, files marked viewed, and a moved head.
-- One live client per review, at most `max_live_clients` (the least recently used idle one closes first). A client closes after `idle_minutes`, when the worktree is released or closed, and on shutdown; the next question resumes the same session.
+- One live client per review, at most `max_live_clients` (the least recently used idle one closes first). A client closes after `idle_minutes`, when the worktree is released or closed, and on shutdown; the next batch resumes the same session.
 - With `warmup = "inbox"`, the first open of a PR from your direct review requests writes an overview thread: the change, its risks, and questions for the author.
-- `CODE_REVIEW_MCP_AGENT=0` turns the agent off. Each question uses your Claude account and costs money; `GET /api/reviews/{id}/agent` shows the total.
+- `CODE_REVIEW_MCP_AGENT=0` turns the agent off. Staging still works; send and warm-up return 409. Each batch uses your Claude account and costs money; `GET /api/reviews/{id}/agent` shows the total.
 
 ```toml
 [agent]
 enabled = true
 model = "claude-opus-5-5"
-idle_minutes = 30
+idle_minutes = 120
 max_live_clients = 3
 max_turns = 30                 # passed to the CLI as --max-turns
-question_timeout_minutes = 5
+question_timeout_minutes = 5   # per batch turn
 max_client_budget_usd = 10     # per client process; the client restarts at 80%
 warmup = "inbox"               # inbox | always | never
 ```
 
 | Route | Purpose |
 |---|---|
-| `POST /api/reviews/{id}/threads` `{kind: "question", path, side, line, start_line?, start_side?, body}` | Ask about any line; `line: 0` is the file, `path: ""` + `line: 0` the whole PR |
-| `POST /api/threads/{id}/reply {message}` | A follow-up on a question thread |
-| `POST /api/threads/{id}/stop` | Stop the thread's running answer (409 if none) |
-| `GET /api/reviews/{id}/agent` | `{state, session_id, model, cost_usd, context_tokens, queue, running_thread_id, warmup}` |
+| `POST /api/reviews/{id}/threads` `{kind: "question", path, side, line, start_line?, start_side?, body}` | Stage a question (thread `draft`, message `staged`); any line, `line: 0` is the file, `path: ""` + `line: 0` the whole PR |
+| `PATCH /api/threads/{id} {body}` | Edit a staged question (409 once sent) |
+| `DELETE /api/threads/{id}` | Delete a question thread in any status; 409 while its batch is queued or running |
+| `POST /api/threads/{id}/reply {message}` | Stage a follow-up → `{id, reopened: false, status: "staged"}` |
+| `PATCH /api/messages/{id} {body}` / `DELETE /api/messages/{id}` | Edit or delete a staged message → the thread; 409 once sent, and for the question itself on delete |
+| `POST /api/reviews/{id}/agent/send {thread_ids?}` | Send staged items as one batch → `{batch_id, thread_ids}`; 409 when nothing is staged |
+| `POST /api/reviews/{id}/agent/stop` | Stop the running turn and cancel queued batches → `{interrupted, cancelled_batch_ids}`; 409 if nothing runs or waits |
+| `GET /api/reviews/{id}/agent` | `{state, session_id, model, cost_usd, context_tokens, staged_count, queue, running_thread_id, batch, partial, warmup}` |
 | `POST /api/reviews/{id}/agent/warmup` | Write the overview now (409 if one exists or runs) |
 
-SSE events: `agent_status`, `agent_delta {thread_id, text}`, `agent_message {thread_id, message}`, `agent_error {thread_id, error}`.
+`batch` is the running or latest batch: `{id, thread_ids, answered_ids, state}` with `state` one of `queued`, `running`, `done`, `stopped`, `error`. `partial` is `{thread_id, text}`, the text streamed so far for the item being answered, or `null`. A thread carries `agent_error` and each message carries `status` (`staged` or `sent`).
+
+SSE events: `agent_status` (the GET payload), `agent_delta {thread_id, text}`, `agent_message {thread_id, message}`, `agent_error {thread_id, error}`, `thread_added`, `thread_updated {thread}`, `thread_deleted {thread_id, comment_id}`.
 
 ## HTTP API
 

@@ -31,7 +31,7 @@ AGENT_WARMUPS: tuple[AgentWarmup, ...] = ("inbox", "always", "never")
 class AgentConfig:
     enabled: bool = True
     model: str = "claude-opus-5-5"
-    idle_minutes: float = 30.0
+    idle_minutes: float = 120.0
     max_live_clients: int = 3
     max_turns: int = 30
     max_client_budget_usd: float = 10.0

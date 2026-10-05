@@ -1,10 +1,12 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 
 from code_review_mcp.store import MessageRow, ReviewRow, ThreadRow
 from code_review_mcp.worktrees import ChangedFile
 
 BODY_LIMIT = 4000
 COMMENT_LIMIT = 600
+EARLIER_LIMIT = 1500
 
 WARMUP_QUESTION = (
     "Read the diff and the touched files. Summarize the change, the risks, and the "
@@ -25,6 +27,10 @@ def review_instructions(repo: str, number: int) -> str:
         "- A deletions-side line is in the old file at the merge base; read it with "
         "`git show <merge_base>:<path>`.\n"
         "- Cite code as path:line.\n"
+        "- Questions arrive in batches of numbered items. Answer every item by calling "
+        "answer_question(thread_id, answer) once per item, with a markdown answer. You may "
+        "read code first and relate the questions to each other. Text you write outside "
+        "answer_question is not shown to the user.\n"
         "- Call draft_review_comment only when the user asks you to draft a review comment. "
         "It saves a draft that the user edits or deletes before anything is posted. Use a "
         "line inside the PR diff, or line 0 for a file comment.\n"
@@ -78,14 +84,14 @@ def review_delta(
     messages: Mapping[str, Sequence[MessageRow]],
     viewed: Sequence[str],
     *,
-    exclude_thread_id: str | None,
+    exclude_thread_ids: Collection[str],
     head_changes: Sequence[ChangedFile] | None,
 ) -> str:
     """What changed in the review since the agent's last turn, or "" when nothing did.
 
     Covers review comments (new, edited, posted, stale), new and resolved threads, files
     marked viewed, and a moved head. With no earlier turn, every existing review comment
-    and thread counts as new.
+    and thread counts as new. Staged questions, which the user has not sent, never appear.
     """
     since = review.agent_last_turn_at
     items: list[str] = []
@@ -103,7 +109,9 @@ def review_delta(
             )
         items.append(moved)
     for thread in threads:
-        if thread.id == exclude_thread_id:
+        if thread.id in exclude_thread_ids or (
+            thread.kind == "question" and thread.status == "draft"
+        ):
             continue
         created = since is None or thread.created_at > since
         updated = since is None or thread.updated_at > since
@@ -131,26 +139,57 @@ def review_delta(
     return "Changes in the review since your last turn:\n" + "\n".join(f"- {i}" for i in items)
 
 
-def question_prompt(
-    review: ReviewRow,
-    thread: ThreadRow,
-    question: str,
-    *,
-    follow_up: bool,
-    context: str | None,
-    delta: str,
+@dataclass(frozen=True)
+class BatchItem:
+    thread: ThreadRow
+    earlier: Sequence[MessageRow]
+    sent: Sequence[MessageRow]
+
+    @property
+    def follow_up(self) -> bool:
+        return bool(self.earlier)
+
+
+def item_location(thread: ThreadRow) -> str:
+    """`path:line[-end]` and side, "file <path>", or "the PR"."""
+    if not thread.path:
+        return "the PR"
+    if thread.line == 0:
+        return f"file {thread.path}"
+    if thread.start_line is not None:
+        sides = (
+            f"{thread.start_side} to {thread.side} side"
+            if thread.start_side not in (None, thread.side)
+            else f"{thread.side} side"
+        )
+        return f"{thread.path}:{thread.start_line}-{thread.line} ({sides})"
+    return f"{thread.path}:{thread.line} ({thread.side} side)"
+
+
+def batch_prompt(
+    review: ReviewRow, items: Sequence[BatchItem], *, context: str | None, delta: str
 ) -> str:
-    """The prompt for one question turn."""
+    """The prompt for one batch turn: every item with its thread id, location, and text."""
     parts: list[str] = []
     if context:
         parts.append(context)
     if delta:
         parts.append(delta)
-    header = (
-        f"{'Follow-up in' if follow_up else 'New'} question thread {thread.id} about "
-        f"{location(thread)}. Head {review.head_sha}, merge base {review.merge_base_sha}."
+    parts.append(
+        f"Answer {len(items)} item(s) about {review.repo}#{review.pr_number}. Head "
+        f"{review.head_sha}, merge base {review.merge_base_sha}. An additions-side line is in "
+        "the new file at the head; a deletions-side line is in the old file at the merge "
+        "base. Answer every item by calling answer_question(thread_id, answer) once per "
+        "item. You may read code first and relate the items to each other."
     )
-    parts += [header, f"Question:\n{question.strip()}"]
+    for number, item in enumerate(items, start=1):
+        lines = [f"Item {number}: thread {item.thread.id}, about {item_location(item.thread)}"]
+        if item.earlier:
+            lines.append("Earlier messages in this thread:")
+            lines += [f"[{m.author}] {_short(m.body, EARLIER_LIMIT)}" for m in item.earlier]
+        label = "Follow-up" if item.follow_up else "Question"
+        lines.append(f"{label}:\n" + "\n\n".join(m.body.strip() for m in item.sent))
+        parts.append("\n".join(lines))
     return "\n\n".join(parts)
 
 

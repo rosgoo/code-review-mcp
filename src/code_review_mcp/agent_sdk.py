@@ -17,13 +17,14 @@ from claude_agent_sdk import (
     tool,
 )
 
-from code_review_mcp.agent_gates import DRAFT_TOOL, make_pre_tool_use_gate
+from code_review_mcp.agent_gates import ANSWER_TOOL, DRAFT_TOOL, make_pre_tool_use_gate
 from code_review_mcp.agents import (
     AgentEvent,
     AgentFailure,
-    DraftHandler,
     SessionSpec,
     TextDelta,
+    ToolHandler,
+    ToolInputDelta,
     TurnEnd,
 )
 
@@ -39,6 +40,7 @@ ALLOWED_TOOLS = [
     "Bash(git diff:*)",
     "Bash(git blame:*)",
     DRAFT_TOOL,
+    ANSWER_TOOL,
 ]
 DRAFT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -63,8 +65,26 @@ DRAFT_SCHEMA: dict[str, Any] = {
 }
 
 
-def draft_server(handler: DraftHandler) -> Any:
-    """An in-process MCP server named "review" with one tool, draft_review_comment."""
+ANSWER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "thread_id": {"type": "string", "description": "The item's thread id"},
+        "answer": {"type": "string", "description": "The answer to that item, in markdown"},
+    },
+    "required": ["thread_id", "answer"],
+}
+
+
+def _tool_result(text: str, ok: bool) -> dict[str, Any]:
+    result: dict[str, Any] = {"content": [{"type": "text", "text": text}]}
+    if not ok:
+        result["is_error"] = True
+    return result
+
+
+def review_server(draft: ToolHandler, answer: ToolHandler) -> Any:
+    """An in-process MCP server named "review" with draft_review_comment and
+    answer_question."""
 
     @tool(
         "draft_review_comment",
@@ -74,13 +94,22 @@ def draft_server(handler: DraftHandler) -> Any:
         DRAFT_SCHEMA,
     )
     async def draft_review_comment(args: dict[str, Any]) -> dict[str, Any]:
-        outcome = await handler(args)
-        result: dict[str, Any] = {"content": [{"type": "text", "text": outcome.text}]}
-        if not outcome.ok:
-            result["is_error"] = True
-        return result
+        outcome = await draft(args)
+        return _tool_result(outcome.text, outcome.ok)
 
-    return create_sdk_mcp_server(name="review", version="1.0.0", tools=[draft_review_comment])
+    @tool(
+        "answer_question",
+        "Answer one item of the current batch. Call it once per item, with the item's "
+        "thread_id and a markdown answer. The user sees only answers given this way.",
+        ANSWER_SCHEMA,
+    )
+    async def answer_question(args: dict[str, Any]) -> dict[str, Any]:
+        outcome = await answer(args)
+        return _tool_result(outcome.text, outcome.ok)
+
+    return create_sdk_mcp_server(
+        name="review", version="1.0.0", tools=[draft_review_comment, answer_question]
+    )
 
 
 def session_options(spec: SessionSpec) -> ClaudeAgentOptions:
@@ -97,7 +126,7 @@ def session_options(spec: SessionSpec) -> ClaudeAgentOptions:
         settings=json.dumps({"disableAllHooks": True}),
         strict_mcp_config=True,
         hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[make_pre_tool_use_gate(spec.cwd)])]},
-        mcp_servers={"review": draft_server(spec.draft)},
+        mcp_servers={"review": review_server(spec.draft, spec.answer)},
         include_partial_messages=True,
         max_turns=spec.max_turns,
         max_budget_usd=spec.max_budget_usd,
@@ -121,15 +150,31 @@ class SdkAgentSession:
 
     async def events(self) -> AsyncIterator[AgentEvent]:
         text_blocks: list[str] = []
+        tools: dict[str, str] = {}
+        message_number = 0
         try:
             async for message in self._client.receive_response():
                 if isinstance(message, StreamEvent):
                     event = message.event
+                    kind = event.get("type")
                     delta = event.get("delta") or {}
-                    if event.get("type") == "content_block_delta" and delta.get("type") == (
-                        "text_delta"
-                    ):
+                    block = f"{message_number}:{event.get('index')}"
+                    if kind == "message_start":
+                        message_number += 1
+                    elif kind == "content_block_start":
+                        content = event.get("content_block") or {}
+                        if content.get("type") == "tool_use":
+                            tools[block] = str(content.get("name", ""))
+                    elif kind == "content_block_delta" and delta.get("type") == "text_delta":
                         yield TextDelta(text=str(delta.get("text", "")))
+                    elif kind == "content_block_delta" and delta.get("type") == (
+                        "input_json_delta"
+                    ):
+                        yield ToolInputDelta(
+                            tool=tools.get(block, ""),
+                            block=block,
+                            partial_json=str(delta.get("partial_json", "")),
+                        )
                 elif (
                     isinstance(message, SystemMessage)
                     and message.subtype == "init"

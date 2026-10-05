@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from code_review_mcp.agent_gates import (
+    ANSWER_TOOL,
     DRAFT_TOOL,
     bash_denial,
     make_pre_tool_use_gate,
@@ -131,6 +132,7 @@ def test_path_gate_denies_outside(worktree: Path, tool: str, tool_input: dict[st
 
 def test_tool_policy_is_deny_by_default(worktree: Path) -> None:
     assert tool_denial(DRAFT_TOOL, {"path": "a", "line": 1}, worktree) is None
+    assert tool_denial(ANSWER_TOOL, {"thread_id": "t", "answer": "a"}, worktree) is None
     assert tool_denial("Bash", {"command": "git log"}, worktree) is None
     for tool in ("Write", "Edit", "NotebookEdit", "WebFetch", "Task", "mcp__other__x"):
         reason = tool_denial(tool, {}, worktree)

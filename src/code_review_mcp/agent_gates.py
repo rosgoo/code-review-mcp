@@ -10,6 +10,7 @@ from claude_agent_sdk import HookCallback, HookContext, HookInput, HookJSONOutpu
 logger = logging.getLogger(__name__)
 
 DRAFT_TOOL = "mcp__review__draft_review_comment"
+ANSWER_TOOL = "mcp__review__answer_question"
 GIT_SUBCOMMANDS = frozenset({"log", "show", "diff", "blame"})
 PATH_TOOLS = frozenset({"Read", "Grep", "Glob"})
 
@@ -128,7 +129,7 @@ def tool_denial(tool_name: str, tool_input: Mapping[str, Any], root: Path) -> st
         return bash_denial(command) if isinstance(command, str) else "Bash needs a command"
     if tool_name in PATH_TOOLS:
         return path_denial(tool_name, tool_input, root)
-    if tool_name == DRAFT_TOOL:
+    if tool_name in (DRAFT_TOOL, ANSWER_TOOL):
         return None
     return f"the review agent cannot use {tool_name}"
 

@@ -37,6 +37,14 @@ class UpdateThreadRequest(BaseModel):
     start_side: Side | None = None
 
 
+class SendRequest(BaseModel):
+    thread_ids: list[str] | None = None
+
+
+class MessageRequest(BaseModel):
+    body: str
+
+
 class SubmitReviewRequest(BaseModel):
     event: SubmissionEvent
     body: str = ""
@@ -55,10 +63,21 @@ def build_pr_router(
     async def agent_warmup(review_id: str) -> dict[str, object]:
         return await agents.start_warmup(review_id)
 
-    @router.post("/threads/{thread_id}/stop")
-    async def stop_thread(thread_id: str) -> dict[str, object]:
-        await agents.stop(thread_id)
-        return {"ok": True}
+    @router.post("/reviews/{review_id}/agent/send")
+    async def agent_send(review_id: str, body: SendRequest | None = None) -> dict[str, object]:
+        return agents.send(review_id, body.thread_ids if body is not None else None)
+
+    @router.post("/reviews/{review_id}/agent/stop")
+    async def agent_stop(review_id: str) -> dict[str, object]:
+        return await agents.stop(review_id)
+
+    @router.patch("/messages/{message_id}")
+    async def update_message(message_id: str, body: MessageRequest) -> dict[str, object]:
+        return threads.update_message(message_id, body.body)
+
+    @router.delete("/messages/{message_id}")
+    async def delete_message(message_id: str) -> dict[str, object]:
+        return threads.delete_message(message_id)
 
     @router.get("/reviews/{review_id}/stack")
     async def review_stack(review_id: str) -> dict[str, object] | None:
@@ -72,10 +91,7 @@ def build_pr_router(
     async def create_thread(review_id: str, body: CreateThreadRequest) -> dict[str, object]:
         anchor = AnchorRequest(body.side, body.line, body.start_line, body.start_side)
         if body.kind == "question":
-            agents.require_on()
-            thread = threads.create_question(review_id, body.path, anchor, body.body)
-            agents.ask(str(thread["id"]))
-            return thread
+            return threads.create_question(review_id, body.path, anchor, body.body)
         return await threads.create_thread(review_id, body.path, anchor, body.body)
 
     @router.patch("/threads/{thread_id}")

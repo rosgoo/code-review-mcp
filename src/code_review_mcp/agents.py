@@ -4,18 +4,20 @@ import logging
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol
 
 from code_review_mcp.agent_prompts import (
+    BatchItem,
+    batch_prompt,
     pr_context,
-    question_prompt,
     review_delta,
     review_instructions,
     warmup_prompt,
 )
+from code_review_mcp.answer_stream import AnswerStream
 from code_review_mcp.config import Settings
 from code_review_mcp.errors import ConflictError, NotFoundError, ReviewError
 from code_review_mcp.github import GitHubClient
@@ -23,7 +25,14 @@ from code_review_mcp.hub import ReviewHub
 from code_review_mcp.pr_service import PrService, ReadyPr
 from code_review_mcp.repo_config import AgentConfig, ConfigError, RepoConfig
 from code_review_mcp.review_threads import AnchorRequest, ThreadService, serialize_thread
-from code_review_mcp.store import MessageRow, ReviewRow, Side, Store, ThreadRow, utc_now
+from code_review_mcp.store import (
+    MessageRow,
+    ReviewRow,
+    Side,
+    Store,
+    ThreadStatus,
+    utc_now,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,15 +40,28 @@ RECYCLE_FRACTION = 0.8
 STOP_GRACE_SECONDS = 30.0
 REAP_INTERVAL_SECONDS = 60.0
 OVERVIEW_PATH = ""
+ANSWER_TOOL = "mcp__review__answer_question"
+NOT_ANSWERED = "The agent did not answer this question."
+DAEMON_STOPPED = "The daemon stopped before the agent answered this question."
 
-JobKind = Literal["question", "warmup"]
+JobKind = Literal["batch", "warmup"]
 AgentState = Literal["idle", "queued", "running", "error", "off"]
 WarmupStatus = Literal["none", "running", "done", "error"]
+BatchState = Literal["queued", "running", "done", "stopped", "error"]
 
 
 @dataclass(frozen=True)
 class TextDelta:
     text: str
+
+
+@dataclass(frozen=True)
+class ToolInputDelta:
+    """A chunk of the JSON input of a tool call; `block` identifies the call in the turn."""
+
+    tool: str
+    block: str
+    partial_json: str
 
 
 @dataclass(frozen=True)
@@ -52,7 +74,7 @@ class TurnEnd:
     aborted: bool
 
 
-AgentEvent = TextDelta | TurnEnd
+AgentEvent = TextDelta | ToolInputDelta | TurnEnd
 
 
 class AgentSession(Protocol):
@@ -69,23 +91,18 @@ class AgentSession(Protocol):
     async def context_tokens(self) -> int | None: ...
 
 
-class DraftOutcome(NamedTuple):
+class ToolOutcome(NamedTuple):
     ok: bool
     text: str
 
 
-class _Question(NamedTuple):
-    body: str
-    follow_up: bool
+ToolHandler = Callable[[Mapping[str, Any]], Awaitable[ToolOutcome]]
 
 
 class _Drained(NamedTuple):
     end: TurnEnd
     text: str
     timed_out: bool
-
-
-DraftHandler = Callable[[Mapping[str, Any]], Awaitable[DraftOutcome]]
 
 
 @dataclass(frozen=True)
@@ -98,7 +115,8 @@ class SessionSpec:
     max_turns: int
     max_budget_usd: float
     instructions: str
-    draft: DraftHandler
+    draft: ToolHandler
+    answer: ToolHandler
 
 
 SessionFactory = Callable[[SessionSpec], Awaitable[AgentSession]]
@@ -124,9 +142,49 @@ def scrub_agent_env(environ: MutableMapping[str, str]) -> list[str]:
 
 
 @dataclass
-class _Job:
+class _BatchItem:
     thread_id: str
+    message_ids: list[str]
+    previous_status: ThreadStatus
+    answered: bool = False
+
+
+@dataclass
+class _Batch:
+    id: str
+    items: list[_BatchItem]
+    state: BatchState = "queued"
+
+    def item(self, thread_id: str) -> _BatchItem | None:
+        return next((i for i in self.items if i.thread_id == thread_id), None)
+
+    def json(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "thread_ids": [i.thread_id for i in self.items],
+            "answered_ids": [i.thread_id for i in self.items if i.answered],
+            "state": self.state,
+        }
+
+
+@dataclass
+class _Partial:
+    thread_id: str
+    block: str
+    parts: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _Job:
     kind: JobKind
+    thread_id: str | None = None
+    batch: _Batch | None = None
+
+    @property
+    def thread_ids(self) -> list[str]:
+        if self.batch is not None:
+            return [i.thread_id for i in self.batch.items]
+        return [self.thread_id] if self.thread_id else []
 
 
 @dataclass
@@ -145,6 +203,25 @@ class _ReviewAgent:
     context_tokens: int | None = None
     warmup_status: WarmupStatus | None = None
     warmup_thread_id: str | None = None
+    latest_batch: _Batch | None = None
+    answering_thread_id: str | None = None
+    streams: dict[str, AnswerStream] = field(default_factory=dict)
+    partial: _Partial | None = None
+    turn_sent: bool = False
+
+    def held_thread_ids(self) -> set[str]:
+        """Threads of the running turn and of every queued turn."""
+        held = {tid for job in self.jobs for tid in job.thread_ids}
+        if self.running is not None:
+            held.update(self.running.thread_ids)
+        return held
+
+    def waiting_thread_ids(self) -> set[str]:
+        """Threads that wait for an answer: queued, or unanswered in the running batch."""
+        waiting = {tid for job in self.jobs for tid in job.thread_ids}
+        if self.running is not None and self.running.batch is not None:
+            waiting.update(i.thread_id for i in self.running.batch.items if not i.answered)
+        return waiting
 
 
 def _anchor_side(value: object) -> Side | None:
@@ -155,13 +232,25 @@ def _anchor_side(value: object) -> Side | None:
     return None
 
 
-class AgentRunner:
-    """Answers question threads with one agent session per PR review.
+def _message_json(message: MessageRow) -> dict[str, object]:
+    return {
+        "id": message.id,
+        "author": message.author,
+        "body": message.body,
+        "created_at": message.created_at,
+        "status": message.status,
+    }
 
-    Questions on one review run one at a time, in order; different reviews run in
-    parallel. At most `max_live_clients` sessions stay open; the least recently used idle
-    one closes first. A session closes after `idle_minutes`, when the review's worktree is
-    released or removed, and on shutdown. The next question resumes the stored session.
+
+class AgentRunner:
+    """Answers staged questions with one agent session per PR review.
+
+    The user stages questions and follow-ups, then sends them; each send is one batch turn
+    in which the agent answers every item with answer_question. Turns on one review run one
+    at a time, in order; different reviews run in parallel. At most `max_live_clients`
+    sessions stay open; the least recently used idle one closes first. A session closes
+    after `idle_minutes`, when the review's worktree is released or removed, and on
+    shutdown. The next turn resumes the stored session.
     """
 
     def __init__(
@@ -191,6 +280,20 @@ class AgentRunner:
         self._background: set[asyncio.Task[None]] = set()
         prs.on_pr_opened(self._pr_opened)
         prs.on_worktree_removed(self._worktree_removed)
+        threads.on_staged_change(self._publish_status)
+        self._recover()
+
+    def _recover(self) -> None:
+        """Stage again the questions that a stopped daemon left without an answer."""
+        for thread_id, message_ids in self._store.unanswered_questions().items():
+            first = self._store.list_messages(thread_id)[0]
+            self._store.restage_question(
+                thread_id,
+                message_ids,
+                status="draft" if first.id in message_ids else "submitted",
+                agent_error=DAEMON_STOPPED,
+            )
+            logger.info("staged question thread %s again after a restart", thread_id)
 
     def _config(self) -> AgentConfig:
         try:
@@ -201,6 +304,11 @@ class AgentRunner:
 
     def enabled(self) -> bool:
         return self._settings.agent_enabled and self._config().enabled
+
+    def require_on(self) -> None:
+        """Raise ConflictError when the agent is off (config or CODE_REVIEW_MCP_AGENT=0)."""
+        if not self.enabled():
+            raise ConflictError("The review agent is off")
 
     def _agent(self, review_id: str) -> _ReviewAgent:
         agent = self._agents.get(review_id)
@@ -217,15 +325,25 @@ class AgentRunner:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    def _overview_thread(self, review_id: str) -> ThreadRow | None:
+    def _overview_thread_id(self, review_id: str) -> str | None:
         return next(
             (
-                t
+                t.id
                 for t in self._store.list_threads(review_id, kind="question")
                 if t.path == OVERVIEW_PATH and t.line == 0 and t.created_by == "agent"
             ),
             None,
         )
+
+    def _staged(self, review_id: str) -> dict[str, list[MessageRow]]:
+        """Question threads with staged messages, in thread order, with those messages."""
+        messages = self._store.messages_for_review(review_id)
+        staged: dict[str, list[MessageRow]] = {}
+        for thread in self._store.list_threads(review_id, kind="question"):
+            pending = [m for m in messages.get(thread.id, []) if m.status == "staged"]
+            if pending:
+                staged[thread.id] = pending
+        return staged
 
     def status(self, review_id: str) -> dict[str, object]:
         """The review's agent state, as GET /agent and SSE agent_status carry it."""
@@ -242,40 +360,44 @@ class AgentRunner:
             state = "error"
         else:
             state = "idle"
-        overview = self._overview_thread(review_id)
-        warmup_status: WarmupStatus = agent.warmup_status or ("done" if overview else "none")
+        overview_id = self._overview_thread_id(review_id)
+        warmup_status: WarmupStatus = agent.warmup_status or ("done" if overview_id else "none")
+        running = agent.running
+        batch = running.batch if running is not None and running.batch else agent.latest_batch
+        partial = agent.partial
         return {
             "state": state,
             "session_id": review.agent_session_id,
             "model": self._config().model,
             "cost_usd": review.agent_cost_usd,
             "context_tokens": agent.context_tokens,
-            "queue": [job.thread_id for job in agent.jobs],
-            "running_thread_id": agent.running.thread_id if agent.running else None,
+            "staged_count": len(self._staged(review_id)),
+            "queue": [tid for job in agent.jobs for tid in job.thread_ids],
+            "running_thread_id": (
+                running.thread_id
+                if running is not None and running.kind == "warmup"
+                else agent.answering_thread_id
+            ),
+            "batch": batch.json() if batch is not None else None,
+            "partial": (
+                {"thread_id": partial.thread_id, "text": "".join(partial.parts)}
+                if partial is not None
+                else None
+            ),
             "warmup": {
                 "status": warmup_status,
-                "thread_id": agent.warmup_thread_id or (overview.id if overview else None),
+                "thread_id": agent.warmup_thread_id or overview_id,
             },
         }
 
     def _publish_status(self, review_id: str) -> None:
         self._hub.publish(review_id, "agent_status", self.status(review_id))
 
-    def require_on(self) -> None:
-        """Raise ConflictError when the agent is off (config or CODE_REVIEW_MCP_AGENT=0)."""
-        if not self.enabled():
-            raise ConflictError("The review agent is off")
-
-    def ask(self, thread_id: str) -> None:
-        """Queue a turn that answers the question thread's latest user message."""
-        self.require_on()
-        thread = self._store.get_thread(thread_id)
-        if thread is None:
-            raise NotFoundError(f"Thread {thread_id!r} not found")
-        if thread.kind != "question":
-            raise ReviewError(f"Thread {thread_id!r} is not a question thread")
-        self._prs.require_pr_review(thread.review_id)
-        self._enqueue(thread.review_id, _Job(thread_id=thread_id, kind="question"))
+    def _publish_thread(self, review_id: str, thread_id: str) -> None:
+        if self._store.get_thread(thread_id) is not None:
+            self._hub.publish(
+                review_id, "thread_updated", {"thread": self._threads.thread_json(thread_id)}
+            )
 
     def _enqueue(self, review_id: str, job: _Job) -> None:
         agent = self._agent(review_id)
@@ -284,17 +406,103 @@ class AgentRunner:
             agent.worker = asyncio.create_task(self._work(agent))
         self._publish_status(review_id)
 
-    async def stop(self, thread_id: str) -> None:
-        """Interrupt the running turn of the thread. Raises ConflictError if none runs."""
+    def send(self, review_id: str, thread_ids: Sequence[str] | None = None) -> dict[str, object]:
+        """Send staged questions and follow-ups as one batch turn.
+
+        Without `thread_ids`, every thread with staged messages goes, except a thread that
+        still waits for an earlier answer. Marks those messages sent, and the threads
+        submitted with no agent error. Raises ConflictError when the agent is off, nothing
+        is staged, or a named thread waits for an answer; NotFoundError for a thread
+        outside the review.
+        """
+        self.require_on()
+        review = self._prs.require_pr_review(review_id)
+        if review.status == "closed":
+            raise ReviewError(f"Review {review_id!r} is closed. Open the PR again to ask.")
+        staged = self._staged(review_id)
+        agent = self._agents.get(review_id)
+        waiting = agent.waiting_thread_ids() if agent is not None else set()
+        if thread_ids is None:
+            chosen = [tid for tid in staged if tid not in waiting]
+        else:
+            chosen = list(dict.fromkeys(thread_ids))
+            for thread_id in chosen:
+                thread = self._store.get_thread(thread_id)
+                if thread is None or thread.review_id != review_id:
+                    raise NotFoundError(f"Thread {thread_id!r} not found in this review")
+                if thread_id not in staged:
+                    raise ConflictError(f"Thread {thread_id!r} has nothing staged to send")
+                if thread_id in waiting:
+                    raise ConflictError(
+                        f"Thread {thread_id!r} waits for an answer; send it after that answer"
+                    )
+        if not chosen:
+            raise ConflictError("Nothing is staged to send")
+        items: list[_BatchItem] = []
+        for thread_id in chosen:
+            thread = self._store.get_thread(thread_id)
+            assert thread is not None
+            message_ids = [m.id for m in staged[thread_id]]
+            self._store.mark_question_sent(thread_id, message_ids)
+            items.append(_BatchItem(thread_id, message_ids, thread.status))
+            self._publish_thread(review_id, thread_id)
+        batch = _Batch(id=uuid.uuid4().hex, items=items)
+        self._agent(review_id).latest_batch = batch
+        self._enqueue(review_id, _Job(kind="batch", batch=batch))
+        return {"batch_id": batch.id, "thread_ids": chosen}
+
+    async def stop(self, review_id: str) -> dict[str, object]:
+        """Interrupt the running turn (a batch or the warm-up) and cancel every queued batch.
+
+        The worker drains the interrupted turn to its end. Answered items keep their
+        answers; every other item goes back to staged, and those batches end `stopped`.
+        Raises ConflictError when no turn runs and no batch waits.
+        """
+        self._prs.require_pr_review(review_id)
+        agent = self._agents.get(review_id)
+        queued = [j for j in agent.jobs if j.batch is not None] if agent is not None else []
+        if agent is None or (agent.running is None and not queued):
+            raise ConflictError("No agent turn is running or queued for this review")
+        cancelled: list[str] = []
+        for job in queued:
+            assert job.batch is not None
+            agent.jobs.remove(job)
+            job.batch.state = "stopped"
+            cancelled.append(job.batch.id)
+            for item in job.batch.items:
+                self._restage(review_id, item, None)
+        interrupted = agent.running is not None
+        if interrupted:
+            agent.stop_requested = True
+            if agent.turn_sent and agent.session is not None:
+                await agent.session.interrupt()
+        self._publish_status(review_id)
+        return {"interrupted": interrupted, "cancelled_batch_ids": cancelled}
+
+    def delete_question(self, thread_id: str) -> None:
+        """Delete a question thread in any status, with its messages.
+
+        Raises NotFoundError for an unknown thread, ReviewError for a thread of another
+        kind, and ConflictError while a queued or running turn holds the thread.
+        """
         thread = self._store.get_thread(thread_id)
         if thread is None:
             raise NotFoundError(f"Thread {thread_id!r} not found")
+        if thread.kind != "question":
+            raise ReviewError(f"Thread {thread_id!r} is not a question thread")
         agent = self._agents.get(thread.review_id)
-        if agent is None or agent.running is None or agent.running.thread_id != thread_id:
-            raise ConflictError(f"No agent turn is running for thread {thread_id!r}")
-        agent.stop_requested = True
-        if agent.session is not None:
-            await agent.session.interrupt()
+        if agent is not None and thread_id in agent.held_thread_ids():
+            raise ConflictError(
+                f"Thread {thread_id!r} is in a queued or running agent turn. Stop the agent first."
+            )
+        self._store.delete_thread(thread_id)
+        if agent is not None and agent.warmup_thread_id == thread_id:
+            agent.warmup_thread_id = None
+            agent.warmup_status = None
+        self._hub.publish(
+            thread.review_id, "thread_deleted", {"comment_id": thread_id, "thread_id": thread_id}
+        )
+        self._publish_status(thread.review_id)
 
     async def start_warmup(self, review_id: str) -> dict[str, object]:
         """Create the overview thread and queue the warm-up turn.
@@ -307,14 +515,16 @@ class AgentRunner:
         if review.status == "closed":
             raise ReviewError(f"Review {review_id!r} is closed. Open the PR again.")
         agent = self._agent(review_id)
-        if agent.warmup_status in ("running",) or any(j.kind == "warmup" for j in agent.jobs):
+        if agent.warmup_status == "running" or any(j.kind == "warmup" for j in agent.jobs):
             raise ConflictError("A warm-up is already running for this review")
-        existing = self._overview_thread(review_id)
+        existing = self._overview_thread_id(review_id)
         if existing is not None:
             if agent.warmup_status != "error":
                 raise ConflictError("This review already has an overview")
-            self._store.delete_unposted_thread(existing.id)
-            self._hub.publish(review_id, "thread_deleted", {"thread_id": existing.id})
+            self._store.delete_thread(existing)
+            self._hub.publish(
+                review_id, "thread_deleted", {"comment_id": existing, "thread_id": existing}
+            )
         thread = self._store.create_thread(
             review_id=review_id,
             kind="question",
@@ -333,7 +543,7 @@ class AgentRunner:
             "thread_added",
             {"thread": serialize_thread(thread, self._store.list_messages(thread.id))},
         )
-        self._enqueue(review_id, _Job(thread_id=thread.id, kind="warmup"))
+        self._enqueue(review_id, _Job(kind="warmup", thread_id=thread.id))
         return self.status(review_id)
 
     def _pr_opened(self, review: ReviewRow, created: bool) -> None:
@@ -408,7 +618,10 @@ class AgentRunner:
             await self.reap_idle()
 
     async def shutdown(self) -> None:
-        """Stop every worker and close every client."""
+        """Stop every worker and close every client. Unanswered items go back to staged."""
+        for agent in self._agents.values():
+            while agent.jobs:
+                self._abandon(agent, agent.jobs.popleft())
         tasks = [a.worker for a in self._agents.values() if a.worker and not a.worker.done()]
         tasks += list(self._background)
         for task in tasks:
@@ -469,19 +682,20 @@ class AgentRunner:
             max_budget_usd=config.max_client_budget_usd,
             instructions=review_instructions(review.repo, review.pr_number),
             draft=lambda args: self._draft(review.id, args),
+            answer=lambda args: self._answer(review.id, args),
         )
         agent.session = await self._factory(spec)
         agent.session_fresh = not resume
         agent.session_cost = 0.0
         return agent.session
 
-    async def _draft(self, review_id: str, args: Mapping[str, Any]) -> DraftOutcome:
+    async def _draft(self, review_id: str, args: Mapping[str, Any]) -> ToolOutcome:
         path = args.get("path")
         line = args.get("line")
         body = args.get("body")
         start_line = args.get("start_line")
         if not isinstance(path, str) or not isinstance(line, int) or not isinstance(body, str):
-            return DraftOutcome(False, "path (string), line (integer), and body are required")
+            return ToolOutcome(False, "path (string), line (integer), and body are required")
         try:
             thread = await self._threads.create_thread(
                 review_id,
@@ -496,53 +710,159 @@ class AgentRunner:
                 created_by="agent",
             )
         except ReviewError as e:
-            return DraftOutcome(False, f"The draft was not saved: {e}")
-        return DraftOutcome(
+            return ToolOutcome(False, f"The draft was not saved: {e}")
+        return ToolOutcome(
             True,
             f"Draft review comment {thread['id']} saved on {path} line {thread['line']}. The "
             "user reviews it before anything is posted.",
         )
 
+    async def _answer(self, review_id: str, args: Mapping[str, Any]) -> ToolOutcome:
+        thread_id = args.get("thread_id")
+        answer = args.get("answer")
+        if not isinstance(thread_id, str) or not isinstance(answer, str):
+            return ToolOutcome(False, "thread_id and answer (strings) are required")
+        agent = self._agents.get(review_id)
+        running = agent.running if agent is not None else None
+        batch = running.batch if running is not None else None
+        if agent is None or batch is None:
+            return ToolOutcome(False, "No questions are waiting for an answer.")
+        item = batch.item(thread_id)
+        if item is None:
+            listed = ", ".join(i.thread_id for i in batch.items)
+            return ToolOutcome(False, f"Thread {thread_id} is not in this batch ({listed}).")
+        if item.answered:
+            return ToolOutcome(False, f"Thread {thread_id} already has an answer.")
+        if not answer.strip():
+            return ToolOutcome(False, "The answer is empty.")
+        self._store_answer(agent, item, answer.strip())
+        left = [i.thread_id for i in batch.items if not i.answered]
+        return ToolOutcome(
+            True,
+            f"Saved the answer for thread {thread_id}. "
+            + (f"Still unanswered: {', '.join(left)}." if left else "Every item is answered."),
+        )
+
+    def _store_answer(self, agent: _ReviewAgent, item: _BatchItem, body: str) -> None:
+        message = self._store.add_message(item.thread_id, author="agent", body=body)
+        item.answered = True
+        if agent.answering_thread_id == item.thread_id:
+            agent.answering_thread_id = None
+        if agent.partial is not None and agent.partial.thread_id == item.thread_id:
+            agent.partial = None
+        self._hub.publish(
+            agent.review_id,
+            "agent_message",
+            {"thread_id": item.thread_id, "message": _message_json(message)},
+        )
+        self._publish_status(agent.review_id)
+
     async def _work(self, agent: _ReviewAgent) -> None:
         while agent.jobs:
-            job = agent.jobs[0]
             async with agent.lock:
-                agent.jobs.popleft()
+                if not agent.jobs:
+                    break
+                job = agent.jobs.popleft()
                 agent.running = job
                 agent.stop_requested = False
+                agent.turn_sent = False
+                agent.answering_thread_id = None
+                agent.partial = None
+                agent.streams = {}
+                if job.batch is not None:
+                    job.batch.state = "running"
                 self._publish_status(agent.review_id)
                 try:
                     await self._run(agent, job)
-                    agent.error = None
                 except (ReviewError, OSError) as e:
                     agent.error = str(e)
-                    logger.warning("agent turn for thread %s failed: %s", job.thread_id, e)
-                    self._hub.publish(
-                        agent.review_id,
-                        "agent_error",
-                        {"thread_id": job.thread_id, "error": str(e)},
-                    )
-                    if job.kind == "warmup":
-                        agent.warmup_status = "error"
+                    logger.warning("agent turn on review %s failed: %s", agent.review_id, e)
+                    self._turn_failed(agent, job, str(e))
+                except asyncio.CancelledError:
+                    self._abandon(agent, job)
+                    raise
                 finally:
                     agent.running = None
+                    agent.answering_thread_id = None
+                    agent.partial = None
                     agent.last_used = self._clock()
             async with self._capacity:
                 self._capacity.notify_all()
             self._publish_status(agent.review_id)
         agent.worker = None
 
-    def _thread_question(self, thread: ThreadRow) -> _Question:
-        messages = self._store.list_messages(thread.id)
-        user = [m for m in messages if m.author == "user"]
-        if not user:
-            raise ReviewError(f"Thread {thread.id!r} has no question")
-        return _Question(body=user[-1].body, follow_up=len(user) > 1)
+    def _turn_failed(self, agent: _ReviewAgent, job: _Job, error: str) -> None:
+        if job.batch is not None:
+            job.batch.state = "error"
+            for item in job.batch.items:
+                if not item.answered:
+                    self._restage(agent.review_id, item, error)
+            return
+        agent.warmup_status = "error"
+        if job.thread_id is not None and self._store.get_thread(job.thread_id) is not None:
+            self._store.set_agent_error(job.thread_id, error)
+        self._hub.publish(
+            agent.review_id, "agent_error", {"thread_id": job.thread_id, "error": error}
+        )
+
+    def _abandon(self, agent: _ReviewAgent, job: _Job) -> None:
+        """End a job the daemon will not finish: its unanswered items go back to staged, and
+        a warm-up that wrote nothing loses its empty overview."""
+        if job.batch is not None:
+            job.batch.state = "stopped"
+            for item in job.batch.items:
+                if not item.answered:
+                    self._restage(agent.review_id, item, DAEMON_STOPPED)
+        else:
+            self._drop_warmup(agent, job)
+
+    def _drop_warmup(self, agent: _ReviewAgent, job: _Job) -> None:
+        thread_id = job.thread_id
+        if thread_id is None or self._store.get_thread(thread_id) is None:
+            return
+        if any(m.body for m in self._store.list_messages(thread_id)):
+            return
+        self._store.delete_thread(thread_id)
+        if agent.warmup_thread_id == thread_id:
+            agent.warmup_thread_id = None
+            agent.warmup_status = None
+        self._hub.publish(
+            agent.review_id, "thread_deleted", {"comment_id": thread_id, "thread_id": thread_id}
+        )
+
+    def _restage(self, review_id: str, item: _BatchItem, error: str | None) -> None:
+        """Stage the item's messages again, restore its thread status, and record `error`
+        on the thread (published as agent_error when set)."""
+        if self._store.get_thread(item.thread_id) is None:
+            return
+        self._store.restage_question(
+            item.thread_id, item.message_ids, status=item.previous_status, agent_error=error
+        )
+        self._publish_thread(review_id, item.thread_id)
+        if error is not None:
+            self._hub.publish(
+                review_id, "agent_error", {"thread_id": item.thread_id, "error": error}
+            )
+
+    def _batch_items(self, batch: _Batch) -> list[BatchItem]:
+        items: list[BatchItem] = []
+        for entry in list(batch.items):
+            thread = self._store.get_thread(entry.thread_id)
+            if thread is None:
+                batch.items.remove(entry)
+                continue
+            messages = self._store.list_messages(entry.thread_id)
+            sent_ids = set(entry.message_ids)
+            items.append(
+                BatchItem(
+                    thread=thread,
+                    earlier=[m for m in messages if m.status == "sent" and m.id not in sent_ids],
+                    sent=[m for m in messages if m.id in sent_ids],
+                )
+            )
+        return items
 
     async def _prompt(self, agent: _ReviewAgent, job: _Job, pr: ReadyPr, review: ReviewRow) -> str:
-        thread = self._store.get_thread(job.thread_id)
-        if thread is None:
-            raise ReviewError(f"Thread {job.thread_id!r} was deleted")
         files = await self._prs.changed_files(pr)
         head_changes = None
         if review.agent_head_sha and review.head_sha and review.agent_head_sha != review.head_sha:
@@ -553,18 +873,15 @@ class AgentRunner:
             self._store.list_threads(review.id),
             self._store.messages_for_review(review.id),
             self._store.viewed_since(review.id, review.head_sha, review.agent_last_turn_at),
-            exclude_thread_id=thread.id,
+            exclude_thread_ids=set(job.thread_ids),
             head_changes=head_changes,
         )
         context = pr_context(review, files)
-        if job.kind == "warmup":
+        if job.batch is None:
             return warmup_prompt(review, context, delta)
-        question = self._thread_question(thread)
-        return question_prompt(
+        return batch_prompt(
             review,
-            thread,
-            question.body,
-            follow_up=question.follow_up,
+            self._batch_items(job.batch),
             context=context if agent.session_fresh else None,
             delta=delta,
         )
@@ -575,11 +892,50 @@ class AgentRunner:
         session = await self._session(agent, pr)
         review = self._prs.require_pr_review(agent.review_id)
         prompt = await self._prompt(agent, job, pr, review)
+        if job.batch is not None and not job.batch.items:
+            job.batch.state = "done"
+            return
+        if agent.stop_requested:
+            self._stopped_before_send(agent, job)
+            return
         await session.send(prompt)
+        agent.turn_sent = True
+        if agent.stop_requested:
+            await session.interrupt()
         agent.session_fresh = False
         drained = await self._drain(agent, session, job, config.question_timeout_minutes * 60)
         self._store.record_agent_turn(agent.review_id, at=utc_now(), head_sha=pr.head_sha)
-        await self._finish(agent, job, drained, config)
+        await self._account(agent, drained.end, config)
+        if job.batch is not None:
+            self._finish_batch(agent, job.batch, drained, config)
+        else:
+            self._finish_warmup(agent, job, drained, config)
+
+    def _stopped_before_send(self, agent: _ReviewAgent, job: _Job) -> None:
+        if job.batch is not None:
+            job.batch.state = "stopped"
+            for item in job.batch.items:
+                self._restage(agent.review_id, item, None)
+        else:
+            self._drop_warmup(agent, job)
+
+    def _on_tool_input(self, agent: _ReviewAgent, job: _Job, event: ToolInputDelta) -> None:
+        if event.tool != ANSWER_TOOL or job.batch is None:
+            return
+        stream = agent.streams.setdefault(event.block, AnswerStream())
+        text = stream.feed(event.partial_json)
+        item = job.batch.item(stream.thread_id) if stream.thread_id else None
+        if item is None or item.answered:
+            return
+        if agent.partial is None or agent.partial.block != event.block:
+            agent.partial = _Partial(item.thread_id, event.block)
+            agent.answering_thread_id = item.thread_id
+            self._publish_status(agent.review_id)
+        if text:
+            agent.partial.parts.append(text)
+            self._hub.publish(
+                agent.review_id, "agent_delta", {"thread_id": item.thread_id, "text": text}
+            )
 
     async def _drain(
         self, agent: _ReviewAgent, session: AgentSession, job: _Job, timeout: float
@@ -593,7 +949,7 @@ class AgentRunner:
             timed_out.set()
             await session.interrupt()
             await asyncio.sleep(STOP_GRACE_SECONDS)
-            logger.warning("agent turn for %s did not stop; closing its client", job.thread_id)
+            logger.warning("agent turn on review %s did not stop; closing it", agent.review_id)
             await session.close()
 
         guard = asyncio.create_task(watchdog())
@@ -601,11 +957,17 @@ class AgentRunner:
             async for event in session.events():
                 if isinstance(event, TextDelta):
                     deltas.append(event.text)
-                    self._hub.publish(
-                        agent.review_id,
-                        "agent_delta",
-                        {"thread_id": job.thread_id, "text": event.text},
-                    )
+                    if job.kind == "warmup" and job.thread_id is not None:
+                        if agent.partial is None:
+                            agent.partial = _Partial(job.thread_id, "text")
+                        agent.partial.parts.append(event.text)
+                        self._hub.publish(
+                            agent.review_id,
+                            "agent_delta",
+                            {"thread_id": job.thread_id, "text": event.text},
+                        )
+                elif isinstance(event, ToolInputDelta):
+                    self._on_tool_input(agent, job, event)
                 else:
                     end = event
                     break
@@ -617,19 +979,72 @@ class AgentRunner:
         if end is None:
             await self._close(agent)
             raise AgentFailure(
-                "The agent client stopped without finishing the answer"
-                + (f". Partial answer: {partial[:200]}" if partial else "")
+                "The agent client stopped without finishing the turn"
+                + (f". Partial text: {partial[:200]}" if partial else "")
             )
         return _Drained(end=end, text=partial, timed_out=timed_out.is_set())
 
-    async def _finish(
-        self, agent: _ReviewAgent, job: _Job, drained: _Drained, config: AgentConfig
-    ) -> None:
-        end = drained.end
+    async def _account(self, agent: _ReviewAgent, end: TurnEnd, config: AgentConfig) -> None:
         if end.total_cost_usd is not None:
             spent = max(0.0, end.total_cost_usd - agent.session_cost)
             agent.session_cost = end.total_cost_usd
             self._store.add_agent_cost(agent.review_id, spent)
+        if agent.session is not None:
+            with contextlib.suppress(Exception):
+                agent.context_tokens = await agent.session.context_tokens()
+        if agent.session is not None and (
+            end.subtype == "error_max_budget_usd"
+            or agent.session_cost >= RECYCLE_FRACTION * config.max_client_budget_usd
+        ):
+            logger.info("recycling the agent client of review %s", agent.review_id)
+            await self._close(agent)
+
+    def _finish_batch(
+        self, agent: _ReviewAgent, batch: _Batch, drained: _Drained, config: AgentConfig
+    ) -> None:
+        end = drained.end
+        stopped = drained.timed_out or agent.stop_requested or end.aborted
+        text = (end.result_text or drained.text).strip()
+        unanswered = [i for i in batch.items if not i.answered]
+        if len(batch.items) == 1 and unanswered and text and not stopped and not end.is_error:
+            self._store_answer(agent, unanswered[0], text)
+            unanswered = []
+        elif text:
+            logger.info(
+                "dropped text the agent wrote outside answer_question in batch %s: %s",
+                batch.id,
+                text[:500],
+            )
+        turn_error = f"The agent turn ended with {end.subtype}"
+        error: str | None
+        if drained.timed_out:
+            error = (
+                f"The agent stopped after {config.question_timeout_minutes:g} minutes before "
+                "answering this question."
+            )
+        elif stopped:
+            error = None
+        elif end.is_error:
+            error = turn_error
+        else:
+            error = NOT_ANSWERED
+        for item in unanswered:
+            self._restage(agent.review_id, item, error)
+        if drained.timed_out or (end.is_error and not stopped):
+            batch.state = "error"
+            agent.error = error if drained.timed_out else turn_error
+        elif stopped:
+            batch.state = "stopped"
+            agent.error = None
+        else:
+            batch.state = "done"
+            agent.error = None
+
+    def _finish_warmup(
+        self, agent: _ReviewAgent, job: _Job, drained: _Drained, config: AgentConfig
+    ) -> None:
+        end = drained.end
+        assert job.thread_id is not None
         stopped = drained.timed_out or agent.stop_requested or end.aborted
         if drained.timed_out:
             note = f"_(stopped after {config.question_timeout_minutes:g} minutes)_"
@@ -640,39 +1055,23 @@ class AgentRunner:
             body = drained.text.strip()
         else:
             body = (end.result_text or drained.text).strip()
-        if agent.session is not None:
-            with contextlib.suppress(Exception):
-                agent.context_tokens = await agent.session.context_tokens()
-        if agent.session is not None and (
-            end.subtype == "error_max_budget_usd"
-            or agent.session_cost >= RECYCLE_FRACTION * config.max_client_budget_usd
-        ):
-            logger.info("recycling the agent client of review %s", agent.review_id)
-            await self._close(agent)
         if body:
-            message = self._store_answer(job, body)
+            self._store.update_first_message(job.thread_id, body)
+            first = self._store.list_messages(job.thread_id)[0]
             self._hub.publish(
                 agent.review_id,
                 "agent_message",
-                {"thread_id": job.thread_id, "message": _message_json(message)},
+                {"thread_id": job.thread_id, "message": _message_json(first)},
             )
-        if job.kind == "warmup":
-            agent.warmup_status = "error" if end.is_error and not stopped else "done"
         if end.is_error and not stopped:
-            raise AgentFailure(f"The agent turn ended with {end.subtype}")
-
-    def _store_answer(self, job: _Job, body: str) -> MessageRow:
-        if job.kind == "warmup":
-            self._store.update_first_message(job.thread_id, body)
-            first = self._store.list_messages(job.thread_id)[0]
-            return first
-        return self._store.add_message(job.thread_id, author="agent", body=body)
-
-
-def _message_json(message: MessageRow) -> dict[str, object]:
-    return {
-        "id": message.id,
-        "author": message.author,
-        "body": message.body,
-        "created_at": message.created_at,
-    }
+            agent.warmup_status = "error"
+            agent.error = f"The agent turn ended with {end.subtype}"
+            self._store.set_agent_error(job.thread_id, agent.error)
+            self._hub.publish(
+                agent.review_id,
+                "agent_error",
+                {"thread_id": job.thread_id, "error": agent.error},
+            )
+        else:
+            agent.warmup_status = "done"
+            agent.error = None

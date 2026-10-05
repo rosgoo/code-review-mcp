@@ -15,6 +15,7 @@ ThreadKind = Literal["local", "question", "review_comment"]
 ThreadStatus = Literal["draft", "submitted", "resolved", "stale", "posted"]
 Side = Literal["additions", "deletions"]
 Author = Literal["user", "agent"]
+MessageStatus = Literal["staged", "sent"]
 SubmissionEvent = Literal["APPROVE", "COMMENT", "REQUEST_CHANGES"]
 
 MIGRATIONS: list[str] = [
@@ -123,6 +124,11 @@ MIGRATIONS: list[str] = [
     ALTER TABLE reviews ADD COLUMN agent_last_turn_at TEXT;
     ALTER TABLE reviews ADD COLUMN agent_head_sha TEXT;
     """,
+    """
+    ALTER TABLE messages ADD COLUMN status TEXT NOT NULL DEFAULT 'sent'
+        CHECK (status IN ('staged', 'sent'));
+    ALTER TABLE threads ADD COLUMN agent_error TEXT;
+    """,
 ]
 
 
@@ -219,6 +225,7 @@ class ThreadRow:
     updated_at: str
     github_comment_id: int | None
     github_url: str | None
+    agent_error: str | None = None
 
 
 class ThreadPosting(NamedTuple):
@@ -234,6 +241,7 @@ class MessageRow:
     author: Author
     body: str
     created_at: str
+    status: MessageStatus = "sent"
 
 
 @dataclass(frozen=True)
@@ -573,6 +581,7 @@ class Store:
         start_line: int | None = None,
         start_side: Side | None = None,
         anchor_sha: str | None = None,
+        message_status: MessageStatus = "sent",
     ) -> ThreadRow:
         """Create a thread and its first message, both written by `author`."""
         thread_id = new_id()
@@ -601,9 +610,9 @@ class Store:
                 ),
             )
             self._conn.execute(
-                "INSERT INTO messages (id, thread_id, author, body, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (new_id(), thread_id, author, body, now),
+                "INSERT INTO messages (id, thread_id, author, body, created_at, status)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (new_id(), thread_id, author, body, now, message_status),
             )
         thread = self.get_thread(thread_id)
         assert thread is not None
@@ -653,6 +662,79 @@ class Store:
                 "DELETE FROM threads WHERE id = ? AND status IN ('draft', 'stale')", (thread_id,)
             )
         return cursor.rowcount > 0
+
+    def delete_thread(self, thread_id: str) -> bool:
+        """Delete the thread and its messages in any status. Returns whether it existed.
+
+        A deletion counts as activity on the thread's review.
+        """
+        with self._transaction():
+            self._conn.execute(
+                "UPDATE reviews SET last_activity_at = ?"
+                " WHERE id = (SELECT review_id FROM threads WHERE id = ?)",
+                (timestamp(datetime.now(UTC)), thread_id),
+            )
+            cursor = self._conn.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
+        return cursor.rowcount > 0
+
+    def mark_question_sent(self, thread_id: str, message_ids: Sequence[str]) -> None:
+        """Mark the messages sent at this moment, and the thread submitted with no agent error.
+
+        A sent message takes the send time as its created_at, so it sorts after the answers
+        that came while it was staged.
+        """
+        now = utc_now()
+        with self._transaction():
+            self._conn.executemany(
+                "UPDATE messages SET status = 'sent', created_at = ?"
+                " WHERE id = ? AND thread_id = ?",
+                [(now, m, thread_id) for m in message_ids],
+            )
+            self._conn.execute(
+                "UPDATE threads SET status = 'submitted', agent_error = NULL, updated_at = ?"
+                " WHERE id = ?",
+                (now, thread_id),
+            )
+
+    def restage_question(
+        self,
+        thread_id: str,
+        message_ids: Sequence[str],
+        *,
+        status: ThreadStatus,
+        agent_error: str | None,
+    ) -> None:
+        """Mark the messages staged again and set the thread's status and agent error."""
+        with self._transaction():
+            self._conn.executemany(
+                "UPDATE messages SET status = 'staged' WHERE id = ? AND thread_id = ?",
+                [(m, thread_id) for m in message_ids],
+            )
+            self._conn.execute(
+                "UPDATE threads SET status = ?, agent_error = ?, updated_at = ? WHERE id = ?",
+                (status, agent_error, utc_now(), thread_id),
+            )
+
+    def set_agent_error(self, thread_id: str, agent_error: str | None) -> None:
+        self._conn.execute(
+            "UPDATE threads SET agent_error = ? WHERE id = ?", (agent_error, thread_id)
+        )
+
+    def unanswered_questions(self) -> dict[str, list[str]]:
+        """Question threads with sent user messages after their last agent message, mapped
+        to the ids of those messages, which no answer followed."""
+        rows = self._conn.execute(
+            "SELECT m.id, m.thread_id, m.author, m.status FROM messages m"
+            " JOIN threads t ON t.id = m.thread_id WHERE t.kind = 'question'"
+            " ORDER BY m.created_at, m.rowid"
+        ).fetchall()
+        pending: dict[str, list[str]] = {}
+        for row in rows:
+            if row["author"] == "agent":
+                pending.pop(row["thread_id"], None)
+            elif row["status"] == "sent":
+                pending.setdefault(row["thread_id"], []).append(row["id"])
+        return pending
 
     def update_first_message(self, thread_id: str, body: str) -> None:
         now = utc_now()
@@ -747,20 +829,49 @@ class Store:
         )
         return cursor.rowcount
 
-    def add_message(self, thread_id: str, *, author: Author, body: str) -> MessageRow:
+    def add_message(
+        self, thread_id: str, *, author: Author, body: str, status: MessageStatus = "sent"
+    ) -> MessageRow:
         message = MessageRow(
-            id=new_id(), thread_id=thread_id, author=author, body=body, created_at=utc_now()
+            id=new_id(),
+            thread_id=thread_id,
+            author=author,
+            body=body,
+            created_at=utc_now(),
+            status=status,
         )
         with self._transaction():
             self._conn.execute(
-                "INSERT INTO messages (id, thread_id, author, body, created_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (message.id, thread_id, author, body, message.created_at),
+                "INSERT INTO messages (id, thread_id, author, body, created_at, status)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (message.id, thread_id, author, body, message.created_at, status),
             )
             self._conn.execute(
                 "UPDATE threads SET updated_at = ? WHERE id = ?", (message.created_at, thread_id)
             )
         return message
+
+    def get_message(self, message_id: str) -> MessageRow | None:
+        row = self._conn.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()
+        return None if row is None else MessageRow(**dict(row))
+
+    def update_message_body(self, message_id: str, body: str) -> None:
+        with self._transaction():
+            self._conn.execute("UPDATE messages SET body = ? WHERE id = ?", (body, message_id))
+            self._conn.execute(
+                "UPDATE threads SET updated_at = ?"
+                " WHERE id = (SELECT thread_id FROM messages WHERE id = ?)",
+                (utc_now(), message_id),
+            )
+
+    def delete_message(self, message_id: str) -> None:
+        with self._transaction():
+            self._conn.execute(
+                "UPDATE threads SET updated_at = ?"
+                " WHERE id = (SELECT thread_id FROM messages WHERE id = ?)",
+                (utc_now(), message_id),
+            )
+            self._conn.execute("DELETE FROM messages WHERE id = ?", (message_id,))
 
     def list_messages(self, thread_id: str) -> list[MessageRow]:
         rows = self._conn.execute(

@@ -21,7 +21,7 @@ async def test_health(client: httpx.AsyncClient) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "schema_version": 5,
+        "schema_version": 6,
         "worktrees": {"count": 0, "released": 0},
     }
 

@@ -1,17 +1,42 @@
 import asyncio
 import contextlib
+import json
+import re
 from collections.abc import AsyncIterator, Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
-from code_review_mcp.agents import AgentEvent, SessionSpec, TextDelta, TurnEnd
+from code_review_mcp.agents import (
+    ANSWER_TOOL,
+    AgentEvent,
+    SessionSpec,
+    TextDelta,
+    ToolInputDelta,
+    ToolOutcome,
+    TurnEnd,
+)
 
 Behavior = Callable[["FakeSession", str], Coroutine[Any, Any, None]]
 
+_ITEM = re.compile(r"^\d+: thread (\w+), about ")
 
-def question_of(prompt: str) -> str:
-    marker = "Question:\n"
-    return prompt.split(marker, 1)[1] if marker in prompt else "warm-up"
+
+class PromptItem(NamedTuple):
+    thread_id: str
+    text: str
+    follow_up: bool
+
+
+def items_of(prompt: str) -> list[PromptItem]:
+    """The items of a batch prompt, in prompt order."""
+    items: list[PromptItem] = []
+    for chunk in prompt.split("\n\nItem ")[1:]:
+        match = _ITEM.match(chunk)
+        assert match, chunk
+        follow_up = "\nFollow-up:\n" in chunk
+        text = chunk.split("\nFollow-up:\n" if follow_up else "\nQuestion:\n", 1)[1]
+        items.append(PromptItem(match.group(1), text.strip(), follow_up))
+    return items
 
 
 class FakeSession:
@@ -28,6 +53,8 @@ class FakeSession:
         self.interrupts = 0
         self.interrupted = asyncio.Event()
         self.turn: asyncio.Task[None] | None = None
+        self.tool_results: list[ToolOutcome] = []
+        self._blocks = 0
 
     async def send(self, prompt: str) -> None:
         self.prompts.append(prompt)
@@ -62,6 +89,19 @@ class FakeSession:
         for chunk in chunks:
             await self.stream.put(TextDelta(chunk))
 
+    async def answer(self, thread_id: str, answer: str, *, chunk_size: int = 7) -> ToolOutcome:
+        """Stream the answer_question input in chunks, then run the tool, like the CLI."""
+        self._blocks += 1
+        raw = json.dumps({"thread_id": thread_id, "answer": answer})
+        for start in range(0, len(raw), chunk_size):
+            await self.stream.put(
+                ToolInputDelta(ANSWER_TOOL, f"b{self._blocks}", raw[start : start + chunk_size])
+            )
+        await asyncio.sleep(0.01)
+        outcome = await self.spec.answer({"thread_id": thread_id, "answer": answer})
+        self.tool_results.append(outcome)
+        return outcome
+
     async def end(
         self,
         text: str | None,
@@ -84,14 +124,23 @@ class FakeSession:
         )
 
 
-async def echo_answer(session: FakeSession, prompt: str) -> None:
-    question = question_of(prompt).strip()
-    await session.say("answer to ", question)
-    await session.end(f"answer to {question}")
+async def answer_all(session: FakeSession, prompt: str) -> None:
+    """Answer every batch item with answer_question; a warm-up prompt gets a text answer."""
+    items = items_of(prompt)
+    if not items:
+        await session.say("answer to ", "warm-up")
+        await session.end("answer to warm-up")
+        return
+    for item in items:
+        await session.answer(item.thread_id, f"answer to {item.text}")
+    await session.end("done")
 
 
 async def long_answer(session: FakeSession, prompt: str) -> None:
-    """Stream until interrupted, then stream a tail and end aborted, like the real CLI."""
+    """Answer the first item, then stream text until interrupted, then end aborted."""
+    items = items_of(prompt)
+    if items:
+        await session.answer(items[0].thread_id, f"answer to {items[0].text}")
     while not session.interrupted.is_set():
         await session.say("word ")
         await asyncio.sleep(0.01)
@@ -101,7 +150,7 @@ async def long_answer(session: FakeSession, prompt: str) -> None:
 
 @dataclass
 class FakeAgents:
-    behavior: Behavior = echo_answer
+    behavior: Behavior = answer_all
     sessions: list[FakeSession] = field(default_factory=list)
 
     async def factory(self, spec: SessionSpec) -> FakeSession:
