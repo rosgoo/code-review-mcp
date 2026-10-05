@@ -195,7 +195,7 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
       void loadPr();
       void loadThreads();
       if (event.html_url && event.event) {
-        setSubmitted({ event: event.event, url: event.html_url, posted: null });
+        setSubmitted({ event: event.event, url: event.html_url, posted: event.posted ?? null });
       }
     } else if (threadEventNeedsRefetch(event)) {
       void loadThreads();

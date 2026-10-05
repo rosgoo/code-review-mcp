@@ -96,7 +96,7 @@ export type ReviewEvent =
   | { type: "thread_added"; thread?: ReviewThread }
   | { type: "thread_updated"; thread?: ReviewThread }
   | { type: "threads_stale"; thread_ids: string[] }
-  | { type: "review_submitted"; html_url?: string; event?: ReviewEventName };
+  | { type: "review_submitted"; html_url?: string; event?: ReviewEventName; posted?: number };
 
 export interface InboxItem {
   repo: string;

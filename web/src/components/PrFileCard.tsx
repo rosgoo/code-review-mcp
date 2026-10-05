@@ -97,20 +97,37 @@ function GutterPlus({
   useEffect(() => {
     const element = button.current;
     if (element === null) return;
-    // The diff listens on its own <pre>; stopping here keeps a press on + from also
-    // starting the diff's line selection.
-    const stop = (event: Event) => event.stopPropagation();
-    const click = (event: Event) => {
+    // The diff listens on its own <pre>, so stopping here keeps a press on + from also
+    // starting the diff's line selection. A press picks the line it starts on; a drag
+    // picks the range up to the last line the pointer entered before release.
+    const press = (event: PointerEvent) => {
+      event.stopPropagation();
+      if (event.button !== 0) return;
+      event.preventDefault();
+      const start = latest.current.line;
+      if (start === null) return;
+      const release = () => {
+        const end = hover.get() ?? start;
+        latest.current.onPick({
+          start: start.lineNumber,
+          side: start.side,
+          end: end.lineNumber,
+          endSide: end.side,
+        });
+      };
+      document.addEventListener("pointerup", release, { once: true });
+    };
+    const click = (event: MouseEvent) => {
       event.stopPropagation();
       const picked = latest.current.line;
-      if (picked !== null) {
+      if (event.detail === 0 && picked !== null) {
         latest.current.onPick({ start: picked.lineNumber, end: picked.lineNumber, side: picked.side });
       }
     };
-    element.addEventListener("pointerdown", stop);
+    element.addEventListener("pointerdown", press);
     element.addEventListener("click", click);
     return () => {
-      element.removeEventListener("pointerdown", stop);
+      element.removeEventListener("pointerdown", press);
       element.removeEventListener("click", click);
     };
   });
