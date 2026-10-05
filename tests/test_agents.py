@@ -349,6 +349,7 @@ async def test_unanswered_item_goes_back_to_staged(
     assert threads.thread_json(missed)["agent_error"] == NOT_ANSWERED
     assert threads.thread_json(answered)["agent_error"] is None
 
+    await threads.update_thread(missed, body="two, edited", anchor=None)
     fake.behavior = answer_all
     resent = runner.send(review_id)
     cleared_on_send = threads.thread_json(missed)["agent_error"]
@@ -357,7 +358,10 @@ async def test_unanswered_item_goes_back_to_staged(
     assert resent["thread_ids"] == [missed]
     assert cleared_on_send is None
     assert threads.thread_json(missed)["agent_error"] is None
-    assert _bodies(store, missed)[-1] == ("agent", "sent", "answer to two")
+    assert _bodies(store, missed) == [
+        ("user", "sent", "two, edited"),
+        ("agent", "sent", "answer to two, edited"),
+    ]
 
 
 async def _wait_for_stop(session: FakeSession, prompt: str) -> None:
@@ -737,6 +741,8 @@ async def test_staged_message_rules(
     with pytest.raises(ConflictError, match="delete the thread"):
         threads.delete_message(draft_first.id)
     renamed = await threads.update_thread(draft_id, body="draft q2", anchor=None)
+    store.set_thread_status(draft_id, "submitted")
+    still_staged = await threads.update_thread(draft_id, body="draft q3", anchor=None)
     with pytest.raises(ConflictError, match="only a staged question"):
         await threads.update_thread(thread_id, body="x", anchor=None)
 
@@ -746,6 +752,8 @@ async def test_staged_message_rules(
     assert (edited_messages[-1]["body"], edited_messages[-1]["status"]) == ("better", "staged")
     assert [m["status"] for m in deleted_messages] == ["sent", "sent"]
     assert (renamed_messages[0]["body"], renamed_messages[0]["status"]) == ("draft q2", "staged")
+    assert still_staged["messages"][0]["body"] == "draft q3"  # type: ignore[index]
+    store.set_thread_status(draft_id, "draft")
     assert store.delete_unposted_thread(draft_id)
 
 

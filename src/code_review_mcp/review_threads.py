@@ -326,7 +326,7 @@ class ThreadService:
     ) -> dict[str, object]:
         if anchor is not None or body is None:
             raise ReviewError("Only the body of a staged question can change")
-        if thread.status != "draft":
+        if self._store.list_messages(thread.id)[0].status != "staged":
             raise ConflictError(
                 f"Thread {thread.id!r} was sent; only a staged question can be edited"
             )
