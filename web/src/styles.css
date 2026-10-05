@@ -126,6 +126,14 @@ diffs-container {
   font-weight: 600;
 }
 
+.button.primary:disabled {
+  border-color: var(--border);
+  background: var(--bg-hover);
+  color: var(--muted);
+  opacity: 1;
+  cursor: not-allowed;
+}
+
 .button.primary:hover:not(:disabled) {
   background: var(--accent);
   filter: brightness(1.1);
@@ -1628,4 +1636,168 @@ div.ci-row {
   font-size: 13px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Stacks: the PR page stack bar and the inbox stack groups */
+
+.stack-icon {
+  flex: none;
+  color: var(--muted);
+}
+
+.stack-bar {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.stack-label {
+  font-weight: 600;
+}
+
+.stack-keys {
+  font-size: 12px;
+}
+
+kbd {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg-subtle);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.stack-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  width: min(760px, calc(100vw - 32px));
+  max-height: 60vh;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow);
+}
+
+.stack-menu-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stack-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.stack-item:hover:not(:disabled, .current) {
+  background: var(--bg-hover);
+}
+
+.stack-item:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.stack-item.current {
+  background: var(--submitted-bg);
+  cursor: default;
+}
+
+.stack-item-pos {
+  flex: none;
+  width: 22px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-align: right;
+}
+
+.stack-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stack-item-note {
+  flex: 0 2 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stack-item .tag {
+  flex: none;
+}
+
+.stack-menu-heading {
+  margin: 8px 8px 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tag-current {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tag-based-on {
+  flex: none;
+  padding: 0 6px;
+  border-color: var(--submitted-fg);
+  color: var(--submitted-fg);
+  font-size: 11px;
+}
+
+.tag-stack {
+  flex: none;
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.inbox-group-row .inbox-title {
+  font-weight: 600;
+}
+
+.group-caret {
+  flex: none;
+  width: 10px;
+  color: var(--muted);
+}
+
+.group-count {
+  flex: none;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.inbox-group-members {
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border-muted);
+  list-style: none;
 }

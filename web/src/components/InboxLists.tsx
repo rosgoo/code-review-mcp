@@ -7,19 +7,27 @@ import {
   SORT_KEYS,
   arrangeInbox,
   countPrs,
+  isExpanded,
   parseControls,
+  parseExpansion,
   prLabel,
   repollDelay,
+  serializeExpansion,
+  summarizeGroup,
+  withExpansion,
   type CiFilter,
+  type GroupEntry,
+  type GroupSummary,
   type InboxControls,
+  type InboxGroup,
   type SortKey,
-  type StackEntry,
 } from "../lib/inbox";
 import { decisionLabel, viewerReviewLabel } from "../lib/pr";
 import { reviewPath } from "../lib/router";
 import { readSetting, writeSetting } from "../lib/storage";
 import { formatAge, formatSince } from "../lib/time";
-import type { CheckState, InboxList, InboxName } from "../lib/types";
+import type { InboxList, InboxName } from "../lib/types";
+import { CiIcon, StackIcon } from "./Icons";
 import { Link } from "./Link";
 import { errorMessage } from "./Thread";
 
@@ -198,44 +206,74 @@ export function InboxControlsBar({
   );
 }
 
-const CI_ICONS: Record<string, { icon: string; label: string }> = {
-  success: { icon: "✅", label: "CI passing" },
-  failure: { icon: "❌", label: "CI failing" },
-  pending: { icon: "⏳", label: "CI pending" },
-  none: { icon: "—", label: "No CI checks" },
-};
+const STACK_EXPANSION_KEY = "code-review-mcp:inbox-stacks";
 
-function CiIcon({ state }: { state: CheckState | null }) {
-  const { icon, label } = CI_ICONS[state ?? "none"] ?? CI_ICONS.none!;
+/** Expanded/collapsed stacks in one inbox list, saved per list and stack. */
+function useStackExpansion(list: InboxName) {
+  const [saved, setSaved] = useState(() => parseExpansion(readSetting(STACK_EXPANSION_KEY)));
+  const toggle = useCallback(
+    (groupKey: string) => {
+      const expanded = !isExpanded(saved, list, groupKey);
+      // Merge into what is stored now, because the other lists save to the same key.
+      const stored = parseExpansion(readSetting(STACK_EXPANSION_KEY));
+      writeSetting(
+        STACK_EXPANSION_KEY,
+        serializeExpansion(withExpansion(stored, list, groupKey, expanded)),
+      );
+      setSaved((current) => withExpansion(current, list, groupKey, expanded));
+    },
+    [saved, list],
+  );
+  const expanded = useCallback(
+    (groupKey: string) => isExpanded(saved, list, groupKey),
+    [saved, list],
+  );
+  return { expanded, toggle };
+}
+
+const stackWhere = (group: InboxGroup) =>
+  group.stackNumber !== null ? `stack #${group.stackNumber}` : "a branch stack";
+
+function StackBadge({ group, entry }: { group: InboxGroup; entry: GroupEntry }) {
+  if (entry.basedOn !== null) {
+    return (
+      <span
+        className="tag tag-based-on"
+        title={`Based on #${entry.basedOn}, not in ${stackWhere(group)}`}
+      >
+        based on #{entry.basedOn}
+      </span>
+    );
+  }
+  if (group.size <= 1 || entry.position === null) return null;
   return (
-    <span className="ci-icon" title={label} aria-label={label} role="img">
-      {icon}
+    <span className="stack-pos" title={`PR ${entry.position} of ${group.size} in ${stackWhere(group)}`}>
+      {entry.position}/{group.size}
     </span>
   );
 }
 
 function InboxRow({
+  group,
   entry,
+  nested,
   disabled,
   onOpen,
 }: {
-  entry: StackEntry;
+  group: InboxGroup;
+  entry: GroupEntry;
+  nested: boolean;
   disabled: boolean;
   onOpen(ref: string): void;
 }) {
-  const { item, depth, position, size } = entry;
+  const { item } = entry;
   const decision = decisionLabel(item.review_decision);
   const yours = viewerReviewLabel(item.viewer_review);
   const content = (
     <>
       <CiIcon state={item.ci_state} />
       <span className="inbox-main">
-        {size > 1 && (
-          <span className="stack-pos" title={`PR ${position} of ${size} in a stack`}>
-            {depth > 0 && "↳ "}
-            {position}/{size}
-          </span>
-        )}
+        <StackBadge group={group} entry={entry} />
         <span className="pr-ref">{prLabel(item.repo, item.number)}</span>
         <span className="inbox-title" title={item.title}>
           {item.title}
@@ -277,7 +315,7 @@ function InboxRow({
       </span>
     </>
   );
-  const className = depth > 0 ? "inbox-row stacked" : "inbox-row";
+  const className = nested ? "inbox-row stacked" : "inbox-row";
   return (
     <li>
       {item.review_id ? (
@@ -298,6 +336,89 @@ function InboxRow({
   );
 }
 
+function groupCount(group: InboxGroup, summary: GroupSummary): string {
+  const parts = [
+    summary.inStack < group.size ? `${summary.inStack} of ${group.size} PRs` : `${group.size} PRs`,
+  ];
+  if (summary.basedOn > 0) parts.push(`+${summary.basedOn} based on it`);
+  return parts.join(" ");
+}
+
+function authorsText(authors: readonly string[]): string {
+  if (authors.length === 0) return "unknown";
+  if (authors.length <= 2) return authors.join(", ");
+  return `${authors[0]} +${authors.length - 1}`;
+}
+
+function StackGroup({
+  group,
+  expanded,
+  disabled,
+  onToggle,
+  onOpen,
+}: {
+  group: InboxGroup;
+  expanded: boolean;
+  disabled: boolean;
+  onToggle(key: string): void;
+  onOpen(ref: string): void;
+}) {
+  const summary = useMemo(() => summarizeGroup(group), [group]);
+  const name = group.stackNumber !== null ? `Stack #${group.stackNumber}` : "Branch stack";
+  const membersId = `stack-members-${group.key.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  return (
+    <li className="inbox-group">
+      <button
+        type="button"
+        className={expanded ? "inbox-row inbox-group-row expanded" : "inbox-row inbox-group-row"}
+        aria-expanded={expanded}
+        aria-controls={membersId}
+        onClick={() => onToggle(group.key)}
+      >
+        <CiIcon state={summary.ci} label={`Worst CI in the stack: ${summary.ci ?? "no checks"}`} />
+        <span className="inbox-main">
+          <span className="group-caret" aria-hidden="true">
+            {expanded ? "▾" : "▸"}
+          </span>
+          <StackIcon />
+          <span className="inbox-title" title={summary.rootTitle}>
+            {summary.title}
+          </span>
+          <span className="tag tag-stack">{name}</span>
+          <span className="muted group-count">{groupCount(group, summary)}</span>
+        </span>
+        <span className="inbox-author" title={summary.authors.join(", ")}>
+          {authorsText(summary.authors)}
+        </span>
+        <span className="inbox-review" />
+        <span className="inbox-size" title={`${summary.changedFiles} files changed across the stack`}>
+          <span className="count-add">+{summary.additions}</span>{" "}
+          <span className="count-del">−{summary.deletions}</span>
+        </span>
+        <span className="inbox-time muted">
+          <time dateTime={summary.updatedAt} title={`Latest update ${summary.updatedAt}`}>
+            {formatAge(summary.updatedAt)}
+          </time>
+        </span>
+      </button>
+      {expanded && (
+        <ul className="inbox-group-members" id={membersId}>
+          {group.entries.map((entry) => (
+            <InboxRow
+              key={`${entry.item.repo}#${entry.item.number}`}
+              group={group}
+              entry={entry}
+              nested
+              disabled={disabled}
+              onOpen={onOpen}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+}
+
 function sectionCount(shown: number, list: InboxList): string {
   const loaded = list.items.length;
   const parts = [shown === loaded ? `${loaded}` : `${shown} of ${loaded}`];
@@ -306,6 +427,7 @@ function sectionCount(shown: number, list: InboxList): string {
 }
 
 export function InboxSection({
+  name,
   title,
   state,
   controls,
@@ -316,6 +438,7 @@ export function InboxSection({
   empty,
   className = "",
 }: {
+  name: InboxName;
   title: string;
   state: InboxListState;
   controls: InboxControls;
@@ -332,6 +455,7 @@ export function InboxSection({
     [list, controls],
   );
   const shown = countPrs(groups);
+  const expansion = useStackExpansion(name);
   const header = (
     <>
       <h3>{title}</h3>
@@ -359,15 +483,26 @@ export function InboxSection({
   else {
     body = (
       <ul className="review-list inbox-list">
-        {groups.flatMap((group) =>
-          group.map((entry) => (
+        {groups.map((group) =>
+          group.entries.length > 1 ? (
+            <StackGroup
+              key={group.key}
+              group={group}
+              expanded={expansion.expanded(group.key)}
+              disabled={disabled}
+              onToggle={expansion.toggle}
+              onOpen={onOpen}
+            />
+          ) : (
             <InboxRow
-              key={`${entry.item.repo}#${entry.item.number}`}
-              entry={entry}
+              key={group.key}
+              group={group}
+              entry={group.entries[0]!}
+              nested={false}
               disabled={disabled}
               onOpen={onOpen}
             />
-          )),
+          ),
         )}
       </ul>
     );

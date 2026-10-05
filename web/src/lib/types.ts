@@ -118,6 +118,14 @@ export interface InboxItem {
   labels: string[];
   ci_state: CheckState | null;
   review_id: string | null;
+  /** The GitHub stack the PR is in; null or absent when it is in none. */
+  stack?: InboxStack | null;
+}
+
+export interface InboxStack {
+  number: number;
+  size: number;
+  position: number;
 }
 
 export type InboxName = "direct" | "mine" | "team";
@@ -282,4 +290,41 @@ export interface RefreshResult {
   old_head_sha: string | null;
   new_head_sha: string;
   pr: PrView;
+}
+
+/** "github" is a native GitHub stack. "branches" is a chain of PRs, each based on the previous PR's branch. */
+export type StackSource = "github" | "branches";
+
+export interface StackPr {
+  number: number;
+  title: string;
+  /** Lower case: open, closed, or merged. */
+  state: string;
+  is_draft: boolean;
+  head_ref: string;
+  base_ref: string;
+  url: string;
+  ci_state: CheckState | null;
+  review_id: string | null;
+}
+
+export interface PrStackEntry extends StackPr {
+  position: number;
+}
+
+/** An open PR based on a stack entry's branch that is not in the stack. */
+export interface PrStackExtension extends StackPr {
+  based_on: number;
+}
+
+export interface PrStack {
+  source: StackSource;
+  /** The GitHub stack number; null for a branch stack. */
+  number: number | null;
+  size: number;
+  base_ref: string;
+  /** The reviewed PR's place in the stack; null when it is an extension. */
+  position: number | null;
+  entries: PrStackEntry[];
+  extensions: PrStackExtension[];
 }

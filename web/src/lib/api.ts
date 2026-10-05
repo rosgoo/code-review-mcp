@@ -6,6 +6,7 @@ import type {
   NewReviewThread,
   OpenedPr,
   PrFileContent,
+  PrStack,
   PrView,
   RefreshResult,
   ReviewAnchor,
@@ -75,6 +76,7 @@ export const api = {
     request<InboxList>(`/api/inbox/${name}${refresh ? "?refresh=true" : ""}`),
   openPr: (ref: string) => post<OpenedPr>("/api/prs/open", { ref }),
   prView: (reviewId: string) => request<PrView>(`${reviewPath(reviewId)}/pr`),
+  reviewStack: (reviewId: string) => request<PrStack | null>(`${reviewPath(reviewId)}/stack`),
   prFile: (reviewId: string, path: string) =>
     request<PrFileContent>(`${reviewPath(reviewId)}/file?path=${encodeURIComponent(path)}`),
   refreshPr: (reviewId: string) => post<RefreshResult>(`${reviewPath(reviewId)}/refresh`),

@@ -13,8 +13,10 @@ import {
 } from "../components/PrCommentContext";
 import { PrCommentsPanel } from "../components/PrCommentsPanel";
 import { PrFileCard, type FileLoad } from "../components/PrFileCard";
+import { OpenProgress, usePrOpener } from "../components/PrOpener";
 import { PrReviewBar } from "../components/PrReviewBar";
 import { reviewThreadDomId } from "../components/ReviewThreads";
+import { StackBar } from "../components/StackBar";
 import { errorMessage } from "../components/Thread";
 import { api } from "../lib/api";
 import { jumpTo } from "../lib/dom";
@@ -43,13 +45,15 @@ import {
   threadEventNeedsRefetch,
   threadLocation,
 } from "../lib/review";
-import { navigationState } from "../lib/router";
+import { navigate, navigationState, reviewPath } from "../lib/router";
 import type {
   PrFile,
+  PrStack,
   PrView,
   ReviewAnchor,
   ReviewEventName,
   ReviewThread,
+  StackPr,
   SubmitReviewResult,
 } from "../lib/types";
 
@@ -153,6 +157,8 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
   const [submitted, setSubmitted] = useState<Submitted | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const hintTimer = useRef<number | undefined>(undefined);
+  const [stack, setStack] = useState<PrStack | null>(null);
+  const opener = usePrOpener();
 
   const loadPr = useCallback(async () => {
     try {
@@ -171,10 +177,28 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
     }
   }, [reviewId]);
 
+  const loadStack = useCallback(async () => {
+    try {
+      setStack(await api.reviewStack(reviewId));
+    } catch {
+      // The stack bar is optional; a failed lookup keeps the last answer.
+    }
+  }, [reviewId]);
+
   useEffect(() => {
     void loadPr();
     void loadThreads();
-  }, [loadPr, loadThreads]);
+    void loadStack();
+  }, [loadPr, loadThreads, loadStack]);
+
+  const openPr = opener.open;
+  const goToStackPr = useCallback(
+    (target: StackPr) => {
+      if (target.review_id !== null) navigate(reviewPath(target.review_id));
+      else void openPr(target.url);
+    },
+    [openPr],
+  );
 
   useEffect(() => () => window.clearTimeout(hintTimer.current), []);
 
@@ -191,6 +215,7 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
     else if (event.type === "view_updated") {
       void loadPr();
       void loadThreads();
+      void loadStack();
     } else if (event.type === "review_submitted") {
       void loadPr();
       void loadThreads();
@@ -259,6 +284,7 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
     run("refresh", async () => {
       const result = await api.refreshPr(reviewId);
       setPr(result.pr);
+      void loadStack();
     });
 
   const reload = () =>
@@ -559,6 +585,20 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
       </header>
 
       <div className="pr-header">
+        {pr && stack && (
+          <StackBar
+            stack={stack}
+            number={pr.number}
+            busy={opener.opening !== null}
+            onGo={goToStackPr}
+          />
+        )}
+        {opener.opening && <OpenProgress opening={opener.opening} />}
+        {opener.error && (
+          <div className="banner banner-error" role="alert">
+            Could not open the PR: {opener.error}
+          </div>
+        )}
         {pr && <PrHeader pr={pr} />}
         {pr && pr.status !== "closed" && <ChecksSummary github={pr.github} />}
         {pr && pr.status !== "closed" && pr.worktree_path && (

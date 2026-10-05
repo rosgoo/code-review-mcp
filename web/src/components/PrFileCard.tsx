@@ -82,40 +82,55 @@ type HoverStore = ReturnType<typeof createHoverStore>;
 function GutterPlus({
   hover,
   commentable,
+  onDrag,
   onPick,
 }: {
   hover: HoverStore;
   commentable: Commentable | undefined;
+  onDrag(range: SelectedLineRange | null): void;
   onPick(range: SelectedLineRange): void;
 }) {
   const line = useSyncExternalStore(hover.subscribe, hover.get);
   const button = useRef<HTMLButtonElement>(null);
-  const latest = useRef({ line, onPick });
+  const latest = useRef({ line, onDrag, onPick });
   useEffect(() => {
-    latest.current = { line, onPick };
+    latest.current = { line, onDrag, onPick };
   });
   useEffect(() => {
     const element = button.current;
     if (element === null) return;
     // The diff listens on its own <pre>, so stopping here keeps a press on + from also
     // starting the diff's line selection. A press picks the line it starts on; a drag
-    // picks the range up to the last line the pointer entered before release.
+    // picks the range up to the last line the pointer entered before release, and
+    // reports each range on the way so the diff can highlight it.
     const press = (event: PointerEvent) => {
       event.stopPropagation();
       if (event.button !== 0) return;
       event.preventDefault();
       const start = latest.current.line;
       if (start === null) return;
-      const release = () => {
-        const end = hover.get() ?? start;
-        latest.current.onPick({
-          start: start.lineNumber,
-          side: start.side,
-          end: end.lineNumber,
-          endSide: end.side,
-        });
+      const rangeTo = (end: HoveredLine): SelectedLineRange => ({
+        start: start.lineNumber,
+        side: start.side,
+        end: end.lineNumber,
+        endSide: end.side,
+      });
+      latest.current.onDrag(rangeTo(start));
+      const unsubscribe = hover.subscribe(() => {
+        latest.current.onDrag(rangeTo(hover.get() ?? start));
+      });
+      const listening = new AbortController();
+      const finish = (picked: boolean) => {
+        listening.abort();
+        unsubscribe();
+        const range = rangeTo(hover.get() ?? start);
+        latest.current.onDrag(null);
+        if (picked) latest.current.onPick(range);
       };
-      document.addEventListener("pointerup", release, { once: true });
+      document.addEventListener("pointerup", () => finish(true), { signal: listening.signal });
+      document.addEventListener("pointercancel", () => finish(false), {
+        signal: listening.signal,
+      });
     };
     const click = (event: MouseEvent) => {
       event.stopPropagation();
@@ -184,6 +199,17 @@ function FileDiffView({
   useEffect(() => {
     if (clearSelection) setClearSelection(false);
   }, [clearSelection]);
+  // A + drag shows its range as the diff's selection. Setting the selection makes the
+  // diff report it through onLineSelected, which must not pick lines mid-drag.
+  const [dragRange, setDragRange] = useState<SelectedLineRange | null>(null);
+  const dragging = useRef(false);
+  useEffect(() => {
+    if (dragRange === null) dragging.current = false;
+  }, [dragRange]);
+  const onDrag = useStableCallback((range: SelectedLineRange | null) => {
+    if (range !== null) dragging.current = true;
+    setDragRange(range);
+  });
   const onRange = useStableCallback((range: SelectedLineRange) => {
     actions.pickLines(path, clampSelection(path, range, content.commentable));
     awaitingPick.current = true;
@@ -198,7 +224,7 @@ function FileDiffView({
             enableGutterUtility: true,
             enableLineSelection: true,
             onLineSelected: (range: SelectedLineRange | null) => {
-              if (range !== null) onRange(range);
+              if (range !== null && !dragging.current) onRange(range);
             },
             onLineEnter: ({ lineNumber, annotationSide }: { lineNumber: number; annotationSide: Side }) =>
               hover.enter({ lineNumber, side: annotationSide }),
@@ -224,7 +250,7 @@ function FileDiffView({
     <MultiFileDiff
       {...input}
       options={options}
-      selectedLines={clearSelection ? null : undefined}
+      selectedLines={clearSelection ? null : (dragRange ?? undefined)}
       lineAnnotations={lineAnnotations}
       renderAnnotation={renderReviewAnnotation}
       renderGutterUtility={
@@ -233,6 +259,7 @@ function FileDiffView({
               <GutterPlus
                 hover={hover}
                 commentable={content.commentable}
+                onDrag={onDrag}
                 onPick={onRange}
               />
             )

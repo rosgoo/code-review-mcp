@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   InboxControlsBar,
   InboxSection,
@@ -6,59 +6,16 @@ import {
   useInboxLists,
 } from "../components/InboxLists";
 import { Link } from "../components/Link";
+import { OpenProgress, usePrOpener } from "../components/PrOpener";
 import { errorMessage } from "../components/Thread";
 import { api } from "../lib/api";
-import { useElapsedSeconds } from "../lib/hooks";
 import { INBOX_NAMES, authorsOf, recentLabel } from "../lib/inbox";
-import { navigate, reviewPath } from "../lib/router";
+import { reviewPath } from "../lib/router";
 import { formatAge } from "../lib/time";
 import type { ReviewSummary } from "../lib/types";
 
 const newestFirst = (a: ReviewSummary, b: ReviewSummary) =>
   b.created_at.localeCompare(a.created_at);
-
-interface Opening {
-  ref: string;
-  startedAt: number;
-}
-
-function usePrOpener() {
-  const [opening, setOpening] = useState<Opening | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const busy = useRef(false);
-
-  const open = useCallback(async (ref: string) => {
-    const target = ref.trim();
-    if (!target || busy.current) return;
-    busy.current = true;
-    setError(null);
-    setOpening({ ref: target, startedAt: Date.now() });
-    try {
-      const opened = await api.openPr(target);
-      navigate(reviewPath(opened.review_id), { state: opened.note ? { note: opened.note } : null });
-    } catch (e) {
-      setError(errorMessage(e));
-      setOpening(null);
-      busy.current = false;
-    }
-  }, []);
-
-  return { opening, error, open };
-}
-
-function OpenProgress({ opening }: { opening: Opening }) {
-  const elapsed = useElapsedSeconds(opening.startedAt);
-  return (
-    <p className="open-progress" role="status">
-      <span className="spinner" aria-hidden="true" /> Opening <code>{opening.ref}</code>… {elapsed}{" "}
-      s
-      <span className="muted">
-        {" "}
-        The first open fetches the PR and checks out a worktree. It can take 10 s or more.
-      </span>
-    </p>
-  );
-}
 
 function RecentReviews({ reviews }: { reviews: readonly ReviewSummary[] }) {
   if (reviews.length === 0) {
@@ -169,6 +126,7 @@ export function Inbox() {
           <InboxControlsBar controls={controls} authors={authors} onChange={setControls} />
           <InboxSection
             title="Requested from you"
+            name="direct"
             className="direct-section"
             state={states.direct}
             controls={controls}
@@ -179,6 +137,7 @@ export function Inbox() {
           />
           <InboxSection
             title="Your PRs"
+            name="mine"
             className="mine-section"
             state={states.mine}
             controls={controls}
@@ -189,6 +148,7 @@ export function Inbox() {
           />
           <InboxSection
             title="Requested from your teams"
+            name="team"
             className="team-section"
             state={states.team}
             controls={controls}

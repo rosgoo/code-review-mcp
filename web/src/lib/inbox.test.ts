@@ -1,20 +1,29 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_CONTROLS,
+  MAX_SAVED_EXPANSIONS,
   arrangeInbox,
   authorsOf,
   buildGroups,
+  commonTitle,
   compareItems,
   countPrs,
+  isExpanded,
   matchesQuery,
   parseControls,
+  parseExpansion,
   passesFilter,
   repollDelay,
   MAX_REPOLLS,
   REPOLL_MS,
+  serializeExpansion,
   shellQuote,
+  summarizeGroup,
+  withExpansion,
+  worstCi,
   type InboxControls,
   type InboxGroup,
+  type StackExpansion,
 } from "./inbox";
 import { formatSince } from "./time";
 import type { InboxItem, InboxList } from "./types";
@@ -42,6 +51,7 @@ function pr(number: number, overrides: Partial<InboxItem> = {}): InboxItem {
     labels: [],
     ci_state: "success",
     review_id: null,
+    stack: null,
     ...overrides,
   };
 }
@@ -51,9 +61,14 @@ const controls = (overrides: Partial<InboxControls> = {}): InboxControls => ({
   ...overrides,
 });
 
-const numbers = (groups: readonly InboxGroup[]) => groups.map((g) => g.map((e) => e.item.number));
+const numbers = (groups: readonly InboxGroup[]) =>
+  groups.map((g) => g.entries.map((e) => e.item.number));
 const positions = (groups: readonly InboxGroup[]) =>
-  groups.map((g) => g.map((e) => `${e.item.number}:${e.position}/${e.size}@${e.depth}`));
+  groups.map((g) =>
+    g.entries.map((e) =>
+      e.basedOn === null ? `${e.item.number}:${e.position}/${g.size}` : `${e.item.number}^${e.basedOn}`,
+    ),
+  );
 
 /** A chain like the event-DSL stack: each PR's base is the previous PR's head. */
 function chain(start: number, length: number, skip: readonly number[] = []): InboxItem[] {
@@ -180,8 +195,8 @@ describe("stacks", () => {
     const groups = buildGroups(shuffled);
 
     expect(numbers(groups)).toEqual([[100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110], [7]]);
-    expect(positions(groups)[0]!.slice(0, 3)).toEqual(["100:1/11@0", "101:2/11@1", "102:3/11@2"]);
-    expect(positions(groups)[1]).toEqual(["7:1/1@0"]);
+    expect(positions(groups)[0]!.slice(0, 3)).toEqual(["100:1/11", "101:2/11", "102:3/11"]);
+    expect(positions(groups)[1]).toEqual(["7:1/1"]);
   });
 
   it("splits a chain where a middle PR is missing", () => {
@@ -192,8 +207,8 @@ describe("stacks", () => {
       [203, 204],
     ]);
     expect(positions(groups)).toEqual([
-      ["200:1/2@0", "201:2/2@1"],
-      ["203:1/2@0", "204:2/2@1"],
+      ["200:1/2", "201:2/2"],
+      ["203:1/2", "204:2/2"],
     ]);
   });
 
@@ -204,8 +219,8 @@ describe("stacks", () => {
     const elsewhere = pr(4, { repo: "Maybern/docs", base_ref: "feature" });
 
     expect(positions(buildGroups([younger, elsewhere, older, parent]))).toEqual([
-      ["4:1/1@0"],
-      ["1:1/3@0", "2:2/3@1", "3:3/3@1"],
+      ["4:1/1"],
+      ["1:1/3", "2:2/3", "3:3/3"],
     ]);
   });
 
@@ -226,8 +241,8 @@ describe("stacks", () => {
 
     const noDrafts = arrangeInbox([...loose, ...stack], controls({ hideDrafts: true }));
     expect(positions(noDrafts).find((g) => g[0]!.startsWith("300"))).toEqual([
-      "300:1/3@0",
-      "302:3/3@2",
+      "300:1/3",
+      "302:3/3",
     ]);
     expect(countPrs(noDrafts)).toBe(4);
   });
@@ -238,6 +253,203 @@ describe("stacks", () => {
     const newer = pr(1, { updated_at: "2026-10-05T12:00:00Z" });
 
     expect(numbers(arrangeInbox([newer, ...stack], controls()))).toEqual([[400, 401, 402], [1]]);
+  });
+});
+
+const DSL_TITLES = [
+  "INV-1590: Event DSL 1/10: app tweaks for the event-testing harness",
+  "INV-1590: Event DSL 2/10: harness core",
+  "INV-1590: Event DSL 3/10: capital activity and fee builders",
+  "INV-1590: Event DSL 4/10: allocation rules",
+  "INV-1590: Event DSL 5/10: credit facility",
+  "INV-1590: Event DSL 6/10: waterfall, reporting and fund structure",
+  "INV-1590: Event DSL 7/10: invariants",
+  "INV-1590: Event DSL 8/10: commands and the gap gate",
+  "INV-1590: Event DSL 9/10: template translator and template diff",
+  "INV-1590: Event DSL 10/10: scenarios on a built base",
+];
+const DSL_NUMBERS = [23897, 23898, 23899, 23900, 23901, 23902, 23903, 23904, 23905, 23925];
+
+/** The event-DSL stack as GitHub stack #23906, plus #23907 based on its last branch. */
+function eventDsl(): InboxItem[] {
+  const entries = DSL_NUMBERS.map((number, i) =>
+    pr(number, {
+      title: DSL_TITLES[i]!,
+      author: "rosgoo",
+      base_ref: i === 0 ? "master" : `ryan/event-dsl-${i}`,
+      head_ref: `ryan/event-dsl-${i + 1}`,
+      updated_at: `2026-10-0${1 + (i % 5)}T00:00:00Z`,
+      stack: { number: 23906, size: 10, position: i + 1 },
+    }),
+  );
+  const dbTests = pr(23907, {
+    title: "INV-1590: Event DSL DB tests: calculation reversion and feature flags",
+    author: "rosgoo",
+    base_ref: "ryan/event-dsl-10",
+    head_ref: "ryan/event-dsl-db-tests",
+  });
+  return [...entries, dbTests];
+}
+
+describe("GitHub stacks", () => {
+  it("groups by stack number in position order, whatever the input order", () => {
+    const items = eventDsl().slice(0, 10);
+    const shuffled = [items[4]!, pr(1), items[9]!, items[0]!, ...items.slice(5, 9), ...items.slice(1, 4)];
+
+    const groups = buildGroups(shuffled);
+
+    expect(numbers(groups)).toEqual([[1], [...DSL_NUMBERS]]);
+    expect(groups[1]).toMatchObject({ key: `${REPO}#stack/23906`, source: "github", stackNumber: 23906, size: 10 });
+    expect(positions(groups)[1]!.slice(0, 2)).toEqual(["23897:1/10", "23898:2/10"]);
+    expect(groups[0]).toMatchObject({ source: null, size: 1 });
+  });
+
+  it("puts a PR based on the stack after the entries, marked with its base", () => {
+    const items = eventDsl();
+    const onTop = pr(23999, { base_ref: "ryan/event-dsl-db-tests", head_ref: "ryan/more" });
+
+    const groups = buildGroups([onTop, ...items]);
+
+    expect(groups).toHaveLength(1);
+    expect(positions(groups)[0]!.slice(-3)).toEqual(["23925:10/10", "23907^23925", "23999^23907"]);
+    expect(groups[0]!.entries.at(-1)).toMatchObject({ position: null, basedOn: 23907 });
+  });
+
+  it("keeps the stack size when the list holds only some entries", () => {
+    const items = eventDsl();
+    const groups = buildGroups([items[2]!, items[5]!]);
+
+    expect(positions(groups)).toEqual([["23899:3/10", "23902:6/10"]]);
+  });
+
+  it("falls back to branch chains only for PRs in no GitHub stack", () => {
+    const loose = chain(500, 3);
+    const items = [...loose, ...eventDsl()];
+
+    const groups = buildGroups(items);
+
+    expect(groups.map((g) => g.source)).toEqual(["branches", "github"]);
+    expect(groups[0]).toMatchObject({ key: `${REPO}#branch/500`, stackNumber: null, size: 3 });
+    expect(positions(groups)[0]).toEqual(["500:1/3", "501:2/3", "502:3/3"]);
+  });
+
+  it("treats a PR with no stack field as in no stack", () => {
+    const items = chain(600, 2).map(({ stack: _stack, ...item }) => item);
+
+    expect(buildGroups(items).map((g) => [g.source, g.entries.length])).toEqual([["branches", 2]]);
+  });
+
+  it("does not chain two GitHub stacks by branch", () => {
+    const lower = pr(1, { head_ref: "a", stack: { number: 10, size: 1, position: 1 } });
+    const upper = pr(2, { base_ref: "a", head_ref: "b", stack: { number: 20, size: 1, position: 1 } });
+
+    expect(numbers(buildGroups([lower, upper]))).toEqual([[1], [2]]);
+  });
+
+  it("moves a stack as one unit when sorting and keeps positions when filtering", () => {
+    const items = eventDsl();
+    items[6] = { ...items[6]!, ci_state: "failure" };
+    items[3] = { ...items[3]!, is_draft: true };
+    const loose = [pr(1, { ci_state: "pending" }), pr(2, { ci_state: "success" })];
+
+    const byCi = arrangeInbox([...loose, ...items], controls({ sort: "ci" }));
+    expect(numbers(byCi).map((g) => g.length)).toEqual([11, 1, 1]);
+
+    const noDrafts = arrangeInbox([...loose, ...items], controls({ hideDrafts: true }));
+    const stack = positions(noDrafts).find((g) => g[0]!.startsWith("23897"))!;
+    expect(stack).toHaveLength(10);
+    expect(stack).not.toContain("23900:4/10");
+    expect(stack[3]).toBe("23901:5/10");
+    expect(countPrs(noDrafts)).toBe(12);
+  });
+});
+
+describe("group summary", () => {
+  it("rolls CI up to the worst state and ignores PRs with no CI", () => {
+    expect(worstCi(["success", null, "pending"])).toBe("pending");
+    expect(worstCi(["pending", "failure", "success"])).toBe("failure");
+    expect(worstCi(["skipped", "success"])).toBe("success");
+    expect(worstCi(["skipped"])).toBe("skipped");
+    expect(worstCi([null, null])).toBeNull();
+    expect(worstCi([])).toBeNull();
+  });
+
+  it("uses the common start of the titles when it is at least two words", () => {
+    expect(commonTitle(DSL_TITLES)).toBe("INV-1590: Event DSL");
+    expect(commonTitle(["Add foo bar", "Add foo baz"])).toBe("Add foo");
+    expect(commonTitle(["Fix a", "Fix b"])).toBeNull();
+    expect(commonTitle(["Stack part one", "Stack part one - tests"])).toBe("Stack part one");
+    expect(commonTitle([])).toBeNull();
+  });
+
+  it("cuts the common title before a bracket or backtick it leaves open", () => {
+    const part = (n: number) => `PLAT-3162: Post-\`COMPLETE\` edits (P3) (Part ${n} of 3)`;
+    expect(commonTitle([part(1), part(2), part(3)])).toBe("PLAT-3162: Post-`COMPLETE` edits (P3)");
+    expect(commonTitle(["CORE-14032: [activity stack 1/9] rates", "CORE-14032: [activity stack 2/9] fees"])).toBeNull();
+    expect(commonTitle(["Fix the `foo bar` path", "Fix the `foo baz` path"])).toBe("Fix the");
+  });
+
+  it("summarizes the shown PRs of a stack", () => {
+    const items = eventDsl();
+    items[2] = { ...items[2]!, ci_state: "failure", author: "izaak" };
+    items[10] = { ...items[10]!, ci_state: "pending", updated_at: "2026-10-09T00:00:00Z" };
+    const [group] = buildGroups(items);
+
+    expect(summarizeGroup(group!)).toMatchObject({
+      title: "INV-1590: Event DSL",
+      rootTitle: DSL_TITLES[0],
+      ci: "failure",
+      updatedAt: "2026-10-09T00:00:00Z",
+      authors: ["rosgoo", "izaak"],
+      additions: 110,
+      deletions: 22,
+      inStack: 10,
+      basedOn: 1,
+    });
+  });
+
+  it("falls back to the first PR's title", () => {
+    const [group] = buildGroups([pr(1, { title: "Carry fix", head_ref: "a" }), pr(2, { title: "Fees", base_ref: "a" })]);
+
+    expect(summarizeGroup(group!).title).toBe("Carry fix");
+  });
+});
+
+describe("stack expansion", () => {
+  const key = `${REPO}#stack/23906`;
+
+  it("starts expanded in your PRs and collapsed in the other lists", () => {
+    const none = parseExpansion(null);
+
+    expect(isExpanded(none, "mine", key)).toBe(true);
+    expect(isExpanded(none, "direct", key)).toBe(false);
+    expect(isExpanded(none, "team", key)).toBe(false);
+  });
+
+  it("keeps a choice per list and stack across a save and a load", () => {
+    let saved: StackExpansion = withExpansion(parseExpansion(null), "mine", key, false);
+    saved = withExpansion(saved, "team", key, true);
+    const restored = parseExpansion(serializeExpansion(saved));
+
+    expect(isExpanded(restored, "mine", key)).toBe(false);
+    expect(isExpanded(restored, "team", key)).toBe(true);
+    expect(isExpanded(restored, "direct", key)).toBe(false);
+    expect(isExpanded(restored, "mine", `${REPO}#stack/1`)).toBe(true);
+  });
+
+  it("ignores invalid saved data and keeps only the newest choices", () => {
+    expect(parseExpansion("not json").size).toBe(0);
+    expect(parseExpansion("[true]").size).toBe(0);
+    expect([...parseExpansion(JSON.stringify({ a: true, b: "yes" })).keys()]).toEqual(["a"]);
+
+    let saved: StackExpansion = new Map();
+    for (let i = 0; i <= MAX_SAVED_EXPANSIONS; i++) saved = withExpansion(saved, "mine", `g${i}`, false);
+    saved = withExpansion(saved, "mine", "g1", true);
+
+    expect(saved.size).toBe(MAX_SAVED_EXPANSIONS);
+    expect(isExpanded(saved, "mine", "g0")).toBe(true);
+    expect(isExpanded(saved, "mine", "g1")).toBe(true);
+    expect([...saved.keys()].at(-1)).toBe("mine|g1");
   });
 });
 
