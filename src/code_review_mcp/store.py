@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal, Self
+from typing import Literal, NamedTuple, Self
 
 ReviewKind = Literal["pr", "local"]
 ReviewStatus = Literal["open", "submitted", "closed"]
@@ -93,6 +93,22 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX submissions_review ON submissions (review_id, submitted_at);
     """,
+    """
+    ALTER TABLE reviews ADD COLUMN base_ref TEXT;
+    ALTER TABLE reviews ADD COLUMN head_ref TEXT;
+    ALTER TABLE reviews ADD COLUMN pr_body TEXT;
+    ALTER TABLE reviews ADD COLUMN pr_state TEXT;
+    ALTER TABLE reviews ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0 CHECK (is_draft IN (0, 1));
+    CREATE UNIQUE INDEX reviews_pr ON reviews (repo, pr_number) WHERE kind = 'pr';
+
+    CREATE TABLE viewed_files (
+        review_id TEXT NOT NULL REFERENCES reviews (id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        head_sha TEXT NOT NULL,
+        viewed_at TEXT NOT NULL,
+        PRIMARY KEY (review_id, path, head_sha)
+    );
+    """,
 ]
 
 
@@ -122,6 +138,34 @@ class ReviewRow:
     mode: ReviewMode | None
     created_at: str
     updated_at: str
+    base_ref: str | None
+    head_ref: str | None
+    pr_body: str | None
+    pr_state: str | None
+    is_draft: bool
+
+
+@dataclass(frozen=True)
+class PrReviewFields:
+    repo: str
+    pr_number: int
+    title: str
+    author: str | None
+    url: str
+    pr_body: str
+    pr_state: str
+    is_draft: bool
+    base_ref: str
+    head_ref: str
+    base_sha: str
+    head_sha: str
+    merge_base_sha: str
+    worktree_path: str
+
+
+class PrKey(NamedTuple):
+    repo: str
+    pr_number: int
 
 
 @dataclass(frozen=True)
@@ -177,6 +221,12 @@ def new_id() -> str:
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _review_from_row(row: sqlite3.Row) -> ReviewRow:
+    data = dict(row)
+    data["is_draft"] = bool(data["is_draft"])
+    return ReviewRow(**data)
 
 
 class Store:
@@ -270,13 +320,13 @@ class Store:
 
     def get_review(self, review_id: str) -> ReviewRow | None:
         row = self._conn.execute("SELECT * FROM reviews WHERE id = ?", (review_id,)).fetchone()
-        return None if row is None else ReviewRow(**dict(row))
+        return None if row is None else _review_from_row(row)
 
     def list_reviews(self, limit: int = 50) -> list[ReviewRow]:
         rows = self._conn.execute(
             "SELECT * FROM reviews ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
         ).fetchall()
-        return [ReviewRow(**dict(row)) for row in rows]
+        return [_review_from_row(row) for row in rows]
 
     def update_review_content(
         self,
@@ -293,6 +343,93 @@ class Store:
             )
             self._conn.execute("DELETE FROM review_files WHERE review_id = ?", (review_id,))
             self._insert_files(review_id, files)
+
+    def find_pr_review(self, repo: str, pr_number: int) -> ReviewRow | None:
+        row = self._conn.execute(
+            "SELECT * FROM reviews WHERE kind = 'pr' AND repo = ? AND pr_number = ?",
+            (repo, pr_number),
+        ).fetchone()
+        return None if row is None else _review_from_row(row)
+
+    def pr_review_ids(self) -> dict[PrKey, str]:
+        rows = self._conn.execute(
+            "SELECT id, repo, pr_number FROM reviews WHERE kind = 'pr'"
+        ).fetchall()
+        return {PrKey(row["repo"], row["pr_number"]): row["id"] for row in rows}
+
+    def upsert_pr_review(self, fields: PrReviewFields) -> ReviewRow:
+        """Create the review for (repo, pr_number), or update the existing one in place.
+
+        The existing review keeps its id, threads, and agent state. A closed review reopens;
+        any other status is kept.
+        """
+        now = utc_now()
+        row = self._conn.execute(
+            "INSERT INTO reviews"
+            " (id, kind, title, repo, pr_number, author, url, pr_body, pr_state, is_draft,"
+            "  base_ref, head_ref, base_sha, head_sha, merge_base_sha, worktree_path,"
+            "  created_at, updated_at)"
+            " VALUES (?, 'pr', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT (repo, pr_number) WHERE kind = 'pr' DO UPDATE SET"
+            "  title = excluded.title, author = excluded.author, url = excluded.url,"
+            "  pr_body = excluded.pr_body, pr_state = excluded.pr_state,"
+            "  is_draft = excluded.is_draft, base_ref = excluded.base_ref,"
+            "  head_ref = excluded.head_ref, base_sha = excluded.base_sha,"
+            "  head_sha = excluded.head_sha, merge_base_sha = excluded.merge_base_sha,"
+            "  worktree_path = excluded.worktree_path,"
+            "  status = CASE WHEN status = 'closed' THEN 'open' ELSE status END,"
+            "  updated_at = excluded.updated_at"
+            " RETURNING id",
+            (
+                new_id(),
+                fields.title,
+                fields.repo,
+                fields.pr_number,
+                fields.author,
+                fields.url,
+                fields.pr_body,
+                fields.pr_state,
+                int(fields.is_draft),
+                fields.base_ref,
+                fields.head_ref,
+                fields.base_sha,
+                fields.head_sha,
+                fields.merge_base_sha,
+                fields.worktree_path,
+                now,
+                now,
+            ),
+        ).fetchone()
+        review = self.get_review(row["id"])
+        assert review is not None
+        return review
+
+    def close_pr_review(self, review_id: str) -> None:
+        self._conn.execute(
+            "UPDATE reviews SET status = 'closed', worktree_path = NULL, updated_at = ?"
+            " WHERE id = ?",
+            (utc_now(), review_id),
+        )
+
+    def set_file_viewed(self, review_id: str, path: str, head_sha: str, viewed: bool) -> None:
+        if viewed:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO viewed_files (review_id, path, head_sha, viewed_at)"
+                " VALUES (?, ?, ?, ?)",
+                (review_id, path, head_sha, utc_now()),
+            )
+        else:
+            self._conn.execute(
+                "DELETE FROM viewed_files WHERE review_id = ? AND path = ? AND head_sha = ?",
+                (review_id, path, head_sha),
+            )
+
+    def viewed_paths(self, review_id: str, head_sha: str) -> set[str]:
+        rows = self._conn.execute(
+            "SELECT path FROM viewed_files WHERE review_id = ? AND head_sha = ?",
+            (review_id, head_sha),
+        ).fetchall()
+        return {row["path"] for row in rows}
 
     def touch_review(self, review_id: str) -> None:
         self._conn.execute("UPDATE reviews SET updated_at = ? WHERE id = ?", (utc_now(), review_id))

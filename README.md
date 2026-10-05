@@ -81,6 +81,41 @@ agent -> update_diff(review_id, ...)      ──► browser refreshes in place
 agent -> wait_for_comments(review_id)     ══► [blocks again for next round]
 ```
 
+## PR mode (read-only)
+
+The daemon can open any GitHub PR for review. It reads GitHub through the `gh` CLI, which must be installed and logged in. The daemon never handles a token, and nothing in this mode writes to GitHub.
+
+Optional config in `<data dir>/config.toml` (read on each request, so no restart is needed):
+
+```toml
+default_repo = "Maybern/maybern"           # used for #123, 123, and branch names
+
+[repos]
+"Maybern/maybern" = "~/Dev/maybern"        # use this existing clone
+```
+
+A repo without a `[repos]` entry gets a blobless clone in `<data dir>/clones/<owner>/<name>`.
+
+Each PR review gets one detached worktree at `<data dir>/worktrees/<owner>-<name>-<number>`, checked out at the PR head. Fetches write only `refs/code-review-mcp/pull/<n>/head` and `.../base`. They do not move branches, tags, `origin/*`, or `FETCH_HEAD`. Every git command runs with `core.hooksPath=/dev/null`, so the clone's hooks do not run. A Maybern worktree takes about 650 MB and 10 s to create.
+
+| Tool | What it does |
+|---|---|
+| `list_review_requests(refresh=False)` | Open PRs that request your review (cached 60 s) |
+| `open_pr(ref)` → `{review_id, url}` | `ref`: PR URL, `owner/name#123`, `#123`, commit SHA, or branch. Same PR, same `review_id`. |
+| `get_review(review_id)` | Metadata, changed files, worktree path, thread summary |
+
+| Route | Purpose |
+|---|---|
+| `GET /api/inbox?refresh=false` | Review requests, each with its `review_id` if opened |
+| `POST /api/prs/open {ref}` | Open or reopen a PR → `{review_id, url, note?}` |
+| `GET /api/reviews/{id}/pr` | PR metadata and changed files (status, old path, line counts, viewed) |
+| `GET /api/reviews/{id}/file?path=` | Old content (merge base) and new content (head) of one changed file |
+| `POST /api/reviews/{id}/refresh` | Re-read the PR; on a new head, check it out and send SSE `head_moved` |
+| `PUT` / `DELETE /api/reviews/{id}/viewed {path}` | Mark or unmark a file viewed at the current head |
+| `POST /api/reviews/{id}/close` | Remove the worktree and refs; the review keeps its id |
+
+Code: `github.py` (`gh` calls, ref parsing), `worktrees.py` (git), `pr_service.py`, `pr_web.py` (routes), `repo_config.py` (`config.toml`).
+
 ## HTTP API
 
 | Route | Purpose |

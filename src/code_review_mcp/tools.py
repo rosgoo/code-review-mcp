@@ -13,6 +13,7 @@ from code_review_mcp.local_files import (
     read_text_file,
     require_absolute,
 )
+from code_review_mcp.pr_service import PrService
 from code_review_mcp.service import ReviewService
 from code_review_mcp.store import ReviewFile
 
@@ -42,7 +43,13 @@ INSTRUCTIONS = (
     "- When comparing implementations or showing examples\n"
     "- After completing a task that modified files, show what changed\n"
     "The browser view is always better than dumping code in the terminal. "
-    "Default to using show_files over printing code inline."
+    "Default to using show_files over printing code inline.\n\n"
+    "PR MODE (read-only on GitHub): list_review_requests() lists the open PRs that request "
+    "the user's review. open_pr(ref) opens any GitHub PR in the browser; ref is a PR URL, "
+    "owner/name#123, #123, a commit SHA, or a branch name. It returns a review_id, and "
+    "opening the same PR again returns the same review_id. get_review(review_id) returns "
+    "the PR's metadata, changed files, threads, and worktree_path, a local checkout of the "
+    "PR head that you can read. No tool posts anything to GitHub."
 )
 
 MAX_WAIT_SECONDS = 3600
@@ -73,7 +80,9 @@ def _read_diff(diff: str, diff_file: str) -> str:
     return _read_input_file(diff_file, "diff_file") if diff_file else diff
 
 
-def build_mcp(service: ReviewService, security: TransportSecuritySettings) -> FastMCP:
+def build_mcp(
+    service: ReviewService, prs: PrService, security: TransportSecuritySettings
+) -> FastMCP:
     mcp = FastMCP(
         name="code",
         instructions=INSTRUCTIONS,
@@ -244,5 +253,58 @@ def build_mcp(service: ReviewService, security: TransportSecuritySettings) -> Fa
         except ReviewError as e:
             return {"ok": False, "error": str(e)}
         return {"ok": True, "reply_id": result.message.id}
+
+    @mcp.tool()
+    async def list_review_requests(refresh: bool = False) -> dict[str, object]:
+        """List the open GitHub PRs that request the user's review, newest update first.
+
+        Results are cached for 60 s; refresh=True fetches again.
+        Returns {"fetched_at": str, "items": [{repo, number, title, author, url,
+        updated_at, is_draft, review_id}]}. review_id is null until the PR is opened here.
+        Read-only.
+        """
+        try:
+            return await prs.inbox(refresh=refresh)
+        except ReviewError as e:
+            return {"error": str(e)}
+
+    @mcp.tool()
+    async def open_pr(ref: str) -> dict[str, object]:
+        """Open a GitHub PR for review in the browser.
+
+        ref is one of: a PR URL; owner/name#123; #123 or 123 (uses default_repo from the
+        daemon's config.toml); a 7-40 character commit SHA; or a branch name (in
+        default_repo). If a SHA or branch matches several PRs, the open one wins and "note"
+        says which PR was picked.
+
+        Fetches the PR into a local worktree at its head commit, which can take a while for
+        a large repo on first open. Opening a PR that is already open here returns the same
+        review_id and moves it to the PR's current head.
+        Returns {"review_id": str, "url": str, "note"?: str}. Never posts to GitHub.
+        """
+        try:
+            opened = await prs.open_pr(ref)
+        except ReviewError as e:
+            return {"error": str(e)}
+        service.open_browser(opened.url)
+        result: dict[str, object] = {"review_id": opened.review.id, "url": opened.url}
+        if opened.note:
+            result["note"] = opened.note
+        return result
+
+    @mcp.tool()
+    async def get_review(review_id: str) -> dict[str, object]:
+        """Return a PR review: metadata, changed files, and a summary of its threads.
+
+        Includes title, author, body, state, base_ref/head_ref, base_sha, head_sha,
+        merge_base_sha (the diff is merge_base_sha..head_sha), worktree_path (a local
+        checkout of head_sha that you can read), github (CI checks and review decision as
+        of the last open or refresh, or null), files [{path, old_path, status, additions,
+        deletions, binary, viewed}], thread_counts, and threads. Does not call GitHub.
+        """
+        try:
+            return await prs.get_review(review_id)
+        except ReviewError as e:
+            return {"error": str(e)}
 
     return mcp

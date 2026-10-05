@@ -75,6 +75,8 @@ def serialize_review_summary(review: ReviewRow, url: str) -> dict[str, object]:
         "id": review.id,
         "kind": review.kind,
         "title": review.title,
+        "repo": review.repo,
+        "pr_number": review.pr_number,
         "status": review.status,
         "mode": review.mode,
         "url": url,

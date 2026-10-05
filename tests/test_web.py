@@ -19,7 +19,7 @@ COMMENT = {
 async def test_health(client: httpx.AsyncClient) -> None:
     response = await client.get("/api/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "schema_version": 1}
+    assert response.json() == {"status": "ok", "schema_version": 2}
 
 
 async def test_list_reviews_newest_first(
@@ -34,6 +34,7 @@ async def test_list_reviews_newest_first(
     assert [r["id"] for r in reviews] == [newer.id, older.id]
     assert reviews[0]["url"] == f"http://127.0.0.1:7791/r/{newer.id}"
     assert reviews[0]["kind"] == "local"
+    assert (reviews[0]["repo"], reviews[0]["pr_number"]) == (None, None)
 
 
 async def test_view_and_not_found(client: httpx.AsyncClient, app_service: ReviewService) -> None:

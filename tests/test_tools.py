@@ -24,6 +24,9 @@ TOOL_NAMES = {
     "wait_for_comments",
     "resolve_thread",
     "reply_to_thread",
+    "list_review_requests",
+    "open_pr",
+    "get_review",
 }
 
 

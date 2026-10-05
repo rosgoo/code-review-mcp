@@ -13,11 +13,15 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from code_review_mcp.config import Settings
 from code_review_mcp.errors import ConflictError, NotFoundError, ReviewError
+from code_review_mcp.github import GitHubClient
 from code_review_mcp.hub import ReviewHub
 from code_review_mcp.models import CommentRequest, ReplyRequest
+from code_review_mcp.pr_service import PrService
+from code_review_mcp.pr_web import build_pr_router
 from code_review_mcp.service import ReviewService
 from code_review_mcp.store import Store
 from code_review_mcp.tools import build_mcp, transport_security
+from code_review_mcp.worktrees import WorktreeManager, gh_credential_helper
 
 STATIC_DIR = Path(__file__).parent / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
@@ -114,7 +118,13 @@ def build_api_router(service: ReviewService, hub: ReviewHub, store: Store) -> AP
     return router
 
 
-def create_app(settings: Settings, store: Store) -> FastAPI:
+def create_app(
+    settings: Settings,
+    store: Store,
+    *,
+    github: GitHubClient | None = None,
+    worktrees: WorktreeManager | None = None,
+) -> FastAPI:
     """Build the daemon app: REST + SSE under /api, MCP (streamable HTTP) at /mcp, the UI at
     / and /r/{review_id}, and its built assets under /static.
 
@@ -122,8 +132,15 @@ def create_app(settings: Settings, store: Store) -> FastAPI:
     """
     hub = ReviewHub()
     service = ReviewService(store, hub, settings)
+    prs = PrService(
+        store,
+        hub,
+        settings,
+        github or GitHubClient(),
+        worktrees or WorktreeManager(settings.home, credential_helper=gh_credential_helper()),
+    )
     security = transport_security(settings)
-    mcp = build_mcp(service, security)
+    mcp = build_mcp(service, prs, security)
     mcp_app = mcp.streamable_http_app()
 
     @asynccontextmanager
@@ -142,6 +159,7 @@ def create_app(settings: Settings, store: Store) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.service = service
+    app.state.prs = prs
     app.state.mcp = mcp
 
     app.add_middleware(
@@ -163,6 +181,7 @@ def create_app(settings: Settings, store: Store) -> FastAPI:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
     app.include_router(build_api_router(service, hub, store))
+    app.include_router(build_pr_router(prs))
     # Mount("/mcp") would answer POST /mcp with a 307 to /mcp/, so add the route itself.
     app.router.routes.extend(mcp_app.routes)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
