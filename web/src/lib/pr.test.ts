@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterItems, matchesQuery, recentLabel } from "./inbox";
+import { recentLabel } from "./inbox";
 import {
   attentionChecks,
   countChecks,
@@ -13,42 +13,9 @@ import {
   setFileViewed,
   statusLetter,
   toggleCollapsed,
+  viewerReviewLabel,
 } from "./pr";
-import type { InboxItem, PrCheck, PrFile, ReviewSummary } from "./types";
-
-function item(number: number, title: string, author: string | null = "octocat"): InboxItem {
-  return {
-    repo: "Maybern/maybern",
-    number,
-    title,
-    author,
-    url: `https://github.com/Maybern/maybern/pull/${number}`,
-    updated_at: "2026-10-05T00:00:00Z",
-    is_draft: false,
-    review_id: null,
-  };
-}
-
-describe("inbox filtering", () => {
-  const items = [item(101, "Fix carry rounding", "izaak"), item(202, "Add FX rates", null)];
-
-  it("matches repo#number, number, title, and author, ignoring case", () => {
-    expect(matchesQuery(items[0]!, "maybern/maybern#101")).toBe(true);
-    expect(matchesQuery(items[0]!, "#101")).toBe(true);
-    expect(matchesQuery(items[0]!, "CARRY")).toBe(true);
-    expect(matchesQuery(items[0]!, "izaak")).toBe(true);
-    expect(matchesQuery(items[1]!, "izaak")).toBe(false);
-  });
-
-  it("needs every term to match", () => {
-    expect(filterItems(items, "fx rates").map((i) => i.number)).toEqual([202]);
-    expect(filterItems(items, "fx carry")).toEqual([]);
-  });
-
-  it("keeps everything for an empty query, in order", () => {
-    expect(filterItems(items, "   ").map((i) => i.number)).toEqual([101, 202]);
-  });
-});
+import type { PrCheck, PrFile, ReviewSummary } from "./types";
 
 describe("recentLabel", () => {
   const base: ReviewSummary = {
@@ -185,5 +152,7 @@ describe("checks", () => {
     expect(decisionLabel("CHANGES_REQUESTED")).toBe("Changes requested");
     expect(decisionLabel(null)).toBeNull();
     expect(statusLetter("renamed")).toBe("R");
+    expect(viewerReviewLabel("CHANGES_REQUESTED")).toBe("You requested changes");
+    expect(viewerReviewLabel(null)).toBeNull();
   });
 });

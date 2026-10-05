@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -9,7 +9,15 @@ from typing import NamedTuple
 
 from code_review_mcp.config import Settings
 from code_review_mcp.errors import NotFoundError, ReviewError
-from code_review_mcp.github import GitHubClient, PullRequest, ReviewRequest, StatusCheck
+from code_review_mcp.github import (
+    INBOX_NAMES,
+    GitHubClient,
+    InboxList,
+    InboxListState,
+    InboxName,
+    PullRequest,
+    StatusCheck,
+)
 from code_review_mcp.hub import ReviewHub
 from code_review_mcp.local_files import detect_language
 from code_review_mcp.repo_config import RepoConfig, load_repo_config
@@ -195,30 +203,73 @@ class PrService:
             )
             return self._require_pr_review(review.id)
 
-    async def inbox(self, *, refresh: bool = False) -> dict[str, object]:
-        """Review requests split into `direct` (the user by name) and `team` (only a team)."""
-        snapshot = await self._github.review_requests(refresh=refresh)
+    def _serialize_inbox_list(
+        self, name: InboxName, state: InboxListState, direct: InboxList | None
+    ) -> dict[str, object]:
         review_ids = self._store.pr_review_ids()
-
-        def serialize(items: Sequence[ReviewRequest]) -> list[dict[str, object]]:
-            return [
-                {
-                    "repo": item.repo,
-                    "number": item.number,
-                    "title": item.title,
-                    "author": item.author,
-                    "url": item.url,
-                    "updated_at": item.updated_at,
-                    "is_draft": item.is_draft,
-                    "review_id": review_ids.get(PrKey(item.repo, item.number)),
-                }
-                for item in items
-            ]
-
+        skip = (
+            {(pr.repo, pr.number) for pr in direct.items}
+            if name == "team" and direct is not None
+            else set()
+        )
+        inbox_list = state.inbox_list
         return {
-            "fetched_at": snapshot.fetched_at,
-            "direct": serialize(snapshot.direct),
-            "team": serialize(snapshot.team),
+            "name": name,
+            "total": inbox_list.total,
+            "fetched_at": inbox_list.fetched_at,
+            "refreshing": state.refreshing,
+            "items": [
+                {
+                    "repo": pr.repo,
+                    "number": pr.number,
+                    "title": pr.title,
+                    "url": pr.url,
+                    "author": pr.author,
+                    "author_is_bot": pr.author_is_bot,
+                    "is_draft": pr.is_draft,
+                    "created_at": pr.created_at,
+                    "updated_at": pr.updated_at,
+                    "base_ref": pr.base_ref,
+                    "head_ref": pr.head_ref,
+                    "additions": pr.additions,
+                    "deletions": pr.deletions,
+                    "changed_files": pr.changed_files,
+                    "review_decision": pr.review_decision,
+                    "viewer_review": pr.viewer_review,
+                    "labels": list(pr.labels),
+                    "ci_state": pr.ci_state,
+                    "review_id": review_ids.get(PrKey(pr.repo, pr.number)),
+                }
+                for pr in inbox_list.items
+                if (pr.repo, pr.number) not in skip
+            ],
+        }
+
+    async def inbox_list(self, name: InboxName, *, refresh: bool = False) -> dict[str, object]:
+        """One inbox list as {name, total, fetched_at, refreshing, items}.
+
+        A cached list returns at once, possibly stale with `refreshing` True (see
+        GitHubClient.inbox_list). `team` leaves out any PR in the cached `direct` list.
+        Each item carries its `review_id` if the PR was opened here.
+        """
+        state = await self._github.inbox_list(name, refresh=refresh)
+        return self._serialize_inbox_list(name, state, self._github.cached_inbox_list("direct"))
+
+    async def inbox(self, *, refresh: bool = False) -> dict[str, object]:
+        """All three inbox lists, fetched in parallel, as {fetched_at, direct, mine, team}.
+
+        `fetched_at` is the oldest of the three lists' fetch times.
+        """
+        direct, mine, team = await asyncio.gather(
+            *(self._github.inbox_list(name, refresh=refresh) for name in INBOX_NAMES)
+        )
+        lists: dict[str, object] = {
+            name: self._serialize_inbox_list(name, state, direct.inbox_list)
+            for name, state in zip(INBOX_NAMES, (direct, mine, team), strict=True)
+        }
+        return {
+            "fetched_at": min(state.inbox_list.fetched_at for state in (direct, mine, team)),
+            **lists,
         }
 
     async def open_pr(self, ref: str) -> OpenedPr:

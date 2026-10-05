@@ -275,7 +275,7 @@ diffs-container {
 /* Inbox */
 
 .inbox {
-  max-width: 880px;
+  max-width: 1240px;
   margin: 0 auto;
   padding: 24px 16px;
 }
@@ -819,8 +819,7 @@ diffs-container {
   background: var(--bg);
 }
 
-.open-input:focus,
-.team-filter:focus {
+.open-input:focus {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
 }
@@ -864,7 +863,7 @@ diffs-container {
 
 .section-header h2,
 .section-header h3,
-.team-section summary h3 {
+.collapsible-section summary h3 {
   margin: 0;
 }
 
@@ -872,22 +871,12 @@ diffs-container {
   font-size: 15px;
 }
 
-.team-section summary {
+.collapsible-section summary {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-bottom: 8px;
   cursor: pointer;
-}
-
-.team-filter {
-  display: block;
-  width: 100%;
-  margin-bottom: 8px;
-  padding: 5px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
 }
 
 .list-empty {
@@ -1240,20 +1229,198 @@ div.ci-row {
   text-overflow: ellipsis;
 }
 
-.team-section summary {
+.collapsible-section summary {
   list-style: none;
 }
 
-.team-section summary::-webkit-details-marker {
+.collapsible-section summary::-webkit-details-marker {
   display: none;
 }
 
-.team-section summary::before {
+.collapsible-section summary::before {
   content: "▸";
   width: 10px;
   color: var(--muted);
 }
 
-.team-section[open] summary::before {
+.collapsible-section[open] summary::before {
   content: "▾";
+}
+
+/* Inbox v2: controls, rows, stacks */
+
+.inbox-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+
+.inbox-search {
+  flex: 1 1 260px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.inbox-controls select {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.inbox-search:focus,
+.inbox-controls select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.inbox-list .inbox-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) minmax(90px, 150px) minmax(120px, 200px) 150px 120px;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.inbox-list .inbox-row.stacked {
+  background: var(--bg-subtle);
+}
+
+.inbox-row.stacked .inbox-main {
+  padding-left: 14px;
+}
+
+.inbox-list .inbox-row.stacked:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.inbox-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.stack-pos {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--submitted-bg);
+  color: var(--submitted-fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.ci-icon {
+  text-align: center;
+}
+
+.inbox-author,
+.inbox-review,
+.inbox-size {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.inbox-author {
+  white-space: nowrap;
+}
+
+.inbox-size {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.inbox-review {
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.inbox-yours {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+
+.tag-bot {
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.inbox-time {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.collapsible-section summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+
+@media (max-width: 900px) {
+  .inbox-list .inbox-row {
+    grid-template-columns: 22px minmax(0, 1fr);
+  }
+
+  .inbox-author,
+  .inbox-review,
+  .inbox-size,
+  .inbox-time {
+    grid-column: 2;
+    text-align: left;
+  }
+}
+
+.worktree-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.worktree-path {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.button.button-small {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.worktree-note {
+  font-size: 12px;
+}
+
+.section-meta {
+  font-size: 12px;
 }

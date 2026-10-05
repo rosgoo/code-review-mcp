@@ -114,13 +114,14 @@ idle_days = 7           # default
 
 | Tool | What it does |
 |---|---|
-| `list_review_requests(refresh=False)` | Open PRs that request your review, as `direct` (you by name) and `team` (only a team you are in); up to 100 each, newest first, cached 60 s |
+| `list_review_requests(refresh=False)` | Your open PRs as `direct` (review requested from you by name), `mine` (you wrote them), and `team` (requested only from a team you are in). Each is `{name, total, fetched_at, refreshing, items}` with up to 100 items, newest first, with CI state, review decision, your own review, and size. Stale-while-revalidate after 60 s |
 | `open_pr(ref)` → `{review_id, url}` | `ref`: PR URL, `owner/name#123`, `#123`, commit SHA, or branch. Same PR, same `review_id`. |
 | `get_review(review_id)` | Metadata, changed files, worktree path, thread summary |
 
 | Route | Purpose |
 |---|---|
-| `GET /api/inbox?refresh=false` | Review requests as `{fetched_at, direct, team}`, each item with its `review_id` if opened |
+| `GET /api/inbox/{direct\|mine\|team}?refresh=false` | One list: `{name, total, fetched_at, refreshing, items}`; each item has its `review_id` if opened. `team` leaves out PRs in `direct` |
+| `GET /api/inbox?refresh=false` | All three lists: `{fetched_at, direct, mine, team}` |
 | `POST /api/prs/open {ref}` | Open or reopen a PR → `{review_id, url, note?}` |
 | `GET /api/reviews/{id}/pr` | PR metadata and changed files (status, old path, line counts, viewed) |
 | `GET /api/reviews/{id}/file?path=` | Old content (merge base) and new content (head) of one changed file |
@@ -128,7 +129,9 @@ idle_days = 7           # default
 | `PUT` / `DELETE /api/reviews/{id}/viewed {path}` | Mark or unmark a file viewed at the current head |
 | `POST /api/reviews/{id}/close` | Remove the worktree and refs; the review keeps its id |
 
-In the browser, `/` has an Open box (any ref form above), your direct review requests, your team requests (collapsed, with a filter), and recent reviews. A PR review page shows the PR's refs, CI checks, and review decision; a file tree with a Viewed checkbox per file (a viewed file collapses); and one diff per file, loaded when you scroll near it. Refresh re-reads the PR. When the head moves, a banner offers a reload. Close review removes the worktree. PR pages have no commenting yet.
+The inbox comes from GitHub's GraphQL search, one `gh api graphql` request per list and page of 50, with the lists fetched separately. A larger search exceeds GitHub's request time limit. Each list is cached: a cached list returns at once, and when it is older than 60 s one background refresh starts and the response says `refreshing: true`. Only the first read after a daemon start, and `refresh=true`, wait for GitHub. The page loads `direct` and `mine` first and `team` after them.
+
+In the browser, `/` has an Open box (any ref form above), then three lists: requested from you, your PRs, and requested from your teams (collapsed). One set of controls sorts them (updated, created, author, CI, size) and filters them (text, author, CI state, drafts, bots); the browser keeps your choice. A PR whose base branch is another listed PR's head branch nests under it with its place in the stack, such as 3/11. Recent reviews follow. A PR review page shows the PR's refs, CI checks, and review decision; the worktree path, with buttons that copy the path or `cd <path> && claude` (the daemon force-checks-out this worktree when new commits arrive, so edits there are lost); a file tree with a Viewed checkbox per file (a viewed file collapses); and one diff per file, loaded when you scroll near it. Refresh re-reads the PR. When the head moves, a banner offers a reload. Close review removes the worktree. PR pages have no commenting yet.
 
 Code: `github.py` (`gh` calls, ref parsing), `worktrees.py` (git), `pr_service.py`, `pr_web.py` (routes), `repo_config.py` (`config.toml`).
 

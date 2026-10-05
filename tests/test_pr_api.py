@@ -22,21 +22,15 @@ from .pr_fixtures import (
     REPO,
     FakeGh,
     PrRepo,
+    gql_page,
+    gql_pr,
+    inbox_rule,
     make_pr_repo,
     mapped_config,
     pr_view_json,
 )
 
 PR_URL = f"https://github.com/{REPO}/pull/{PR_NUMBER}"
-INBOX_ITEM = {
-    "author": {"login": "octocat"},
-    "isDraft": True,
-    "number": PR_NUMBER,
-    "repository": {"name": "widgets", "nameWithOwner": REPO},
-    "title": "Make x two",
-    "updatedAt": "2026-10-05T00:00:00Z",
-    "url": PR_URL,
-}
 
 
 @pytest.fixture
@@ -55,9 +49,9 @@ def fake_gh(pr_repo: PrRepo) -> FakeGh:
         code=1,
         stderr=b"GraphQL: Could not resolve to a PullRequest with the number of 404.",
     )
-    other = {**INBOX_ITEM, "number": 2, "url": f"https://github.com/{REPO}/pull/2"}
-    fake.on("--review-requested=@me", stdout=json.dumps([INBOX_ITEM, other]).encode())
-    fake.on("user-review-requested:@me", stdout=json.dumps([INBOX_ITEM]).encode())
+    inbox_rule(fake, "direct", gql_page([gql_pr(PR_NUMBER, isDraft=True, title="Make x two")]))
+    inbox_rule(fake, "mine", gql_page([]))
+    inbox_rule(fake, "team", gql_page([gql_pr(2)]))
     fake.on(
         "search",
         "prs",
@@ -124,6 +118,8 @@ async def test_inbox_view_file_viewed_refresh_close(pr_client: httpx.AsyncClient
     base = f"/api/reviews/{review_id}"
 
     inbox = (await pr_client.get("/api/inbox")).json()
+    direct_only = (await pr_client.get("/api/inbox/direct")).json()
+    unknown_list = await pr_client.get("/api/inbox/everything")
     view = (await pr_client.get(f"{base}/pr")).json()
     file = (await pr_client.get(f"{base}/file", params={"path": "app.py"})).json()
     marked = await pr_client.put(f"{base}/viewed", json={"path": "app.py"})
@@ -133,10 +129,14 @@ async def test_inbox_view_file_viewed_refresh_close(pr_client: httpx.AsyncClient
     closed = await pr_client.post(f"{base}/close")
     after_close = (await pr_client.get(f"{base}/pr")).json()
 
-    assert [(i["number"], i["review_id"], i["is_draft"]) for i in inbox["direct"]] == [
+    assert [(i["number"], i["review_id"], i["is_draft"]) for i in inbox["direct"]["items"]] == [
         (PR_NUMBER, review_id, True)
     ]
-    assert [(i["number"], i["review_id"]) for i in inbox["team"]] == [(2, None)]
+    assert [(i["number"], i["review_id"]) for i in inbox["team"]["items"]] == [(2, None)]
+    assert (inbox["mine"]["total"], inbox["mine"]["items"]) == (0, [])
+    assert (direct_only["name"], direct_only["refreshing"]) == ("direct", False)
+    assert [i["number"] for i in direct_only["items"]] == [PR_NUMBER]
+    assert unknown_list.status_code == 422
     assert sorted(f["path"] for f in view["files"]) == [
         "app.py",
         "data.bin",
@@ -230,8 +230,8 @@ async def test_pr_tools(pr_app: FastAPI, pr_repo: PrRepo) -> None:
         bad = _tool_result(await session.call_tool("open_pr", {"ref": "#404"}))
         missing = _tool_result(await session.call_tool("get_review", {"review_id": "nope"}))
 
-    assert [i["number"] for i in inbox["direct"]] == [PR_NUMBER]
-    assert [i["number"] for i in inbox["team"]] == [2]
+    assert [i["number"] for i in inbox["direct"]["items"]] == [PR_NUMBER]
+    assert [i["number"] for i in inbox["team"]["items"]] == [2]
     assert opened["url"] == f"{BASE_URL}/r/{opened['review_id']}"
     assert again["review_id"] == opened["review_id"]
     assert review["head_sha"] == pr_repo.head_sha

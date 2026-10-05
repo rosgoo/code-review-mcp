@@ -107,3 +107,14 @@ const DECISIONS: Record<string, string> = {
 
 export const decisionLabel = (decision: string | null) =>
   decision === null ? null : DECISIONS[decision] ?? decision.toLowerCase().replace(/_/g, " ");
+
+const VIEWER_REVIEWS: Record<string, string> = {
+  APPROVED: "You approved",
+  CHANGES_REQUESTED: "You requested changes",
+  COMMENTED: "You commented",
+  DISMISSED: "Your review was dismissed",
+  PENDING: "Your review is pending",
+};
+
+export const viewerReviewLabel = (state: string | null) =>
+  state === null ? null : (VIEWER_REVIEWS[state] ?? state.toLowerCase().replace(/_/g, " "));

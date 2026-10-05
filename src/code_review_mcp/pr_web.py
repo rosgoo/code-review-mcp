@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from code_review_mcp.github import InboxName
 from code_review_mcp.pr_service import PrService
 
 
@@ -18,6 +19,10 @@ def build_pr_router(prs: PrService) -> APIRouter:
     @router.get("/inbox")
     async def inbox(refresh: bool = False) -> dict[str, object]:
         return await prs.inbox(refresh=refresh)
+
+    @router.get("/inbox/{name}")
+    async def inbox_list(name: InboxName, refresh: bool = False) -> dict[str, object]:
+        return await prs.inbox_list(name, refresh=refresh)
 
     @router.post("/prs/open")
     async def open_pr(body: OpenPrRequest) -> dict[str, object]:

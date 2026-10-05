@@ -1,6 +1,7 @@
 import type {
   Comment,
-  Inbox,
+  InboxList,
+  InboxName,
   NewComment,
   OpenedPr,
   PrFileContent,
@@ -64,7 +65,8 @@ export const api = {
     }),
   deleteThread: (threadId: string) =>
     request<{ deleted: boolean }>(threadPath(threadId), { method: "DELETE" }),
-  inbox: (refresh = false) => request<Inbox>(refresh ? "/api/inbox?refresh=true" : "/api/inbox"),
+  inboxList: (name: InboxName, refresh = false) =>
+    request<InboxList>(`/api/inbox/${name}${refresh ? "?refresh=true" : ""}`),
   openPr: (ref: string) => post<OpenedPr>("/api/prs/open", { ref }),
   prView: (reviewId: string) => request<PrView>(`${reviewPath(reviewId)}/pr`),
   prFile: (reviewId: string, path: string) =>

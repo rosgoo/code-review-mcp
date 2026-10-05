@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChecksSummary } from "../components/ChecksSummary";
+import { CopyButton } from "../components/CopyButton";
 import { DiffStyleToggle } from "../components/DiffStyleToggle";
 import { fileDomId } from "../components/FileViews";
 import { FileTree, type FileDetail } from "../components/FileTree";
@@ -10,7 +11,7 @@ import { errorMessage } from "../components/Thread";
 import { api } from "../lib/api";
 import { jumpTo } from "../lib/dom";
 import { useDiffStyle, useElapsedSeconds, useReviewEvents } from "../lib/hooks";
-import { prLabel } from "../lib/inbox";
+import { prLabel, shellQuote } from "../lib/inbox";
 import type { ChangeCounts } from "../lib/patch";
 import {
   decisionLabel,
@@ -62,6 +63,23 @@ function PrHeader({ pr }: { pr: PrView }) {
           head {pr.head_sha.slice(0, 7)}
         </code>
       )}
+    </div>
+  );
+}
+
+function WorktreeRow({ path }: { path: string }) {
+  return (
+    <div className="worktree-row">
+      <span className="muted">Worktree</span>
+      <code className="worktree-path" title={path}>
+        {path}
+      </code>
+      <CopyButton text={path} label="Copy path" />
+      <CopyButton text={`cd ${shellQuote(path)} && claude`} label="Copy cd && claude" />
+      <span className="muted worktree-note">
+        The daemon force-checks-out this worktree when new commits arrive, so edits made there
+        are lost.
+      </span>
     </div>
   );
 }
@@ -326,6 +344,9 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
       <div className="pr-header">
         {pr && <PrHeader pr={pr} />}
         {pr && pr.status !== "closed" && <ChecksSummary github={pr.github} />}
+        {pr && pr.status !== "closed" && pr.worktree_path && (
+          <WorktreeRow path={pr.worktree_path} />
+        )}
         {confirmingClose && (
           <div className="banner banner-warning" role="alertdialog" aria-label="Close review">
             <span>

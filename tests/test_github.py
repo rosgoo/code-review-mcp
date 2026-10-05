@@ -1,9 +1,15 @@
+import asyncio
 import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
+from code_review_mcp import github as github_module
 from code_review_mcp.github import (
+    INBOX_PAGE_SIZE,
+    INBOX_QUERIES,
     BranchRef,
     GitHubClient,
     GitHubError,
@@ -14,11 +20,13 @@ from code_review_mcp.github import (
     ResolvedRef,
     ShaRef,
     StatusCheck,
+    parse_inbox_page,
     parse_ref,
 )
+from code_review_mcp.procs import CommandResult
 from code_review_mcp.repo_config import ConfigError, RepoConfig, load_repo_config
 
-from .pr_fixtures import FakeGh, write_config
+from .pr_fixtures import FakeGh, gql_page, gql_pr, inbox_rule, write_config
 
 SHA40 = "cdc893ad69a0543c601bf2a39641fa6f16c90af1"
 
@@ -297,79 +305,260 @@ async def test_gh_errors() -> None:
         await client.pull_request("o/r", 6)
 
 
-def _inbox_item(number: int, title: str, updated_at: str) -> dict[str, object]:
-    return {
-        "author": {"login": "zach", "is_bot": False},
-        "isDraft": False,
-        "number": number,
-        "repository": {"name": "r", "nameWithOwner": "o/r"},
-        "title": title,
-        "updatedAt": updated_at,
-        "url": f"https://github.com/o/r/pull/{number}",
-    }
+INBOX_FIXTURE = gql_page(
+    [
+        gql_pr(
+            10,
+            title="Bot PR, no checks",
+            author={"__typename": "Bot", "login": "dependabot"},
+            commits={"nodes": [{"commit": {"statusCheckRollup": None}}]},
+            labels={"nodes": [{"name": "deps"}, {"name": "ci"}]},
+            updatedAt="2026-10-05T10:00:00Z",
+        ),
+        gql_pr(
+            11,
+            title="Reviewed, errored CI",
+            viewerLatestReview={"state": "CHANGES_REQUESTED"},
+            commits={"nodes": [{"commit": {"statusCheckRollup": {"state": "ERROR"}}}]},
+            reviewDecision=None,
+            isDraft=True,
+            updatedAt="2026-10-05T12:00:00Z",
+        ),
+        gql_pr(12, title="No commits listed", commits={"nodes": []}, author=None),
+        {},
+    ],
+    total=57,
+    cursor="Y3Vyc29yOjQ=",
+)
 
 
-async def test_review_requests_split_direct_and_team() -> None:
+def test_parse_inbox_page() -> None:
+    total, prs, cursor = parse_inbox_page(INBOX_FIXTURE)
+
+    assert (total, cursor) == (57, "Y3Vyc29yOjQ=")
+    assert [pr.number for pr in prs] == [10, 11, 12]
+    bot, reviewed, bare = prs
+    assert (bot.author, bot.author_is_bot, bot.ci_state) == ("dependabot", True, None)
+    assert bot.labels == ("deps", "ci")
+    assert (bot.viewer_review, bot.review_decision) == (None, "REVIEW_REQUIRED")
+    assert (reviewed.author_is_bot, reviewed.ci_state, reviewed.viewer_review) == (
+        False,
+        "failure",
+        "CHANGES_REQUESTED",
+    )
+    assert (reviewed.review_decision, reviewed.is_draft) == (None, True)
+    assert (bare.author, bare.author_is_bot, bare.ci_state) == (None, False, None)
+    assert (bare.base_ref, bare.head_ref, bare.changed_files) == ("main", "branch-12", 2)
+
+
+@pytest.mark.parametrize(
+    ("rollup", "expected"),
+    [
+        ("SUCCESS", "success"),
+        ("FAILURE", "failure"),
+        ("ERROR", "failure"),
+        ("PENDING", "pending"),
+        ("EXPECTED", "pending"),
+    ],
+)
+def test_parse_inbox_rollup_states(rollup: str, expected: str) -> None:
+    commits = {"nodes": [{"commit": {"statusCheckRollup": {"state": rollup}}}]}
+    page = gql_page([gql_pr(1, commits=commits)])
+    [pr] = parse_inbox_page(page)[1]
+    assert pr.ci_state == expected
+
+
+def test_parse_inbox_page_rejects_unexpected_output() -> None:
+    with pytest.raises(GitHubError, match="Unexpected output from gh"):
+        parse_inbox_page(b'{"data": {"search": {"nodes": []}}}')
+
+
+async def test_inbox_list_pages_until_the_last_page() -> None:
     fake = FakeGh()
-    mine = _inbox_item(5, "requested from me", "2026-10-05T10:00:00Z")
-    team_old = _inbox_item(6, "team, older", "2026-10-04T10:00:00Z")
-    team_new = _inbox_item(7, "team, newer", "2026-10-05T12:00:00Z")
-    fake.on("user-review-requested:@me", stdout=json.dumps([mine]).encode())
-    fake.on("--review-requested=@me", stdout=json.dumps([team_old, mine, team_new]).encode())
+    inbox_rule(
+        fake,
+        "team",
+        gql_page([gql_pr(6, updated_at="2026-10-04T10:00:00Z")], total=3, cursor="page2"),
+    )
+    inbox_rule(
+        fake,
+        "team",
+        gql_page([gql_pr(7, updated_at="2026-10-05T12:00:00Z")], total=3, cursor="page3"),
+        "after=page2",
+    )
+    inbox_rule(fake, "team", gql_page([gql_pr(8)], total=3), "after=page3")
     client = GitHubClient(fake)
 
-    snapshot = await client.review_requests()
+    state = await client.inbox_list("team")
 
-    assert [r.number for r in snapshot.direct] == [5]
-    assert [r.number for r in snapshot.team] == [7, 6]
-    [direct_call] = fake.calls_with("user-review-requested:@me")
-    [team_call] = fake.calls_with("--review-requested=@me")
-    for call in (direct_call, team_call):
-        assert call[:2] == ("gh", "search")
-        assert {"--state=open", "--sort=updated", "--order=desc", "--limit=100"} <= set(call)
+    assert state.refreshing is False
+    assert state.inbox_list.total == 3
+    assert [pr.number for pr in state.inbox_list.items] == [7, 8, 6]
+    assert len(fake.calls) == 3
+    for call in fake.calls:
+        assert call[:3] == ("gh", "api", "graphql")
+        assert f"first={INBOX_PAGE_SIZE}" in call
+        assert f"q={INBOX_QUERIES['team']}" in call
+    assert "-user-review-requested:@me" in INBOX_QUERIES["team"]
 
 
-async def test_review_requests_are_cached() -> None:
+async def test_inbox_list_stops_at_the_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(github_module, "INBOX_LIMIT", 2)
     fake = FakeGh()
-    fake.on("user-review-requested:@me", stdout=b"[]")
-    items = [
-        {
-            "author": {"login": "zach", "is_bot": False},
-            "isDraft": False,
-            "number": 2,
-            "repository": {"name": "r", "nameWithOwner": "o/r"},
-            "title": "older",
-            "updatedAt": "2026-10-05T18:00:00Z",
-            "url": "https://github.com/o/r/pull/2",
-        },
-        {
-            "author": {"login": "nat", "is_bot": False},
-            "isDraft": True,
-            "number": 3,
-            "repository": {"name": "r", "nameWithOwner": "o/r"},
-            "title": "newer",
-            "updatedAt": "2026-10-05T19:00:00Z",
-            "url": "https://github.com/o/r/pull/3",
-        },
-    ]
-    fake.on("search", "prs", "--review-requested=@me", stdout=json.dumps(items).encode())
+    inbox_rule(fake, "team", gql_page([gql_pr(1), gql_pr(2)], total=9, cursor="more"))
+    client = GitHubClient(fake)
+
+    state = await client.inbox_list("team")
+
+    assert (state.inbox_list.total, len(state.inbox_list.items)) == (9, 2)
+    assert fake.calls_with("after=more") == []
+
+
+async def test_inbox_list_retries_a_gateway_error_once() -> None:
+    fake = FakeGh()
+    team_query = f"q={INBOX_QUERIES['team']}"
+    fake.on("graphql", team_query, code=1, stderr=b"gh: HTTP 502")
+    client = GitHubClient(fake)
+
+    with pytest.raises(GitHubError, match="'team' inbox list failed: gh: HTTP 502"):
+        await client.inbox_list("team")
+    assert len(fake.calls) == 2
+
+    fake.on("graphql", team_query, code=1, stderr=b"gh: HTTP 401: Bad credentials")
+    with pytest.raises(GitHubError, match="Bad credentials"):
+        await client.inbox_list("team")
+    assert len(fake.calls) == 3
+
+
+@dataclass
+class GatedRunner:
+    """Delegates to a FakeGh, holding each call until `gate` opens."""
+
+    fake: FakeGh
+    gate: asyncio.Event = field(default_factory=asyncio.Event)
+    started: int = 0
+
+    async def __call__(
+        self,
+        args: Sequence[str],
+        *,
+        timeout: float,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandResult:
+        self.started += 1
+        await self.gate.wait()
+        return await self.fake(args, timeout=timeout, cwd=cwd, env=env)
+
+
+def _gated_client(now: list[float]) -> tuple[GitHubClient, GatedRunner, FakeGh]:
+    fake = FakeGh()
+    inbox_rule(fake, "mine", gql_page([gql_pr(1, title="first")]))
+    runner = GatedRunner(fake)
+    return GitHubClient(runner, clock=lambda: now[0]), runner, fake
+
+
+async def test_first_read_waits_and_fresh_reads_are_cached() -> None:
     now = [1000.0]
-    client = GitHubClient(fake, clock=lambda: now[0])
+    client, runner, _ = _gated_client(now)
+    runner.gate.set()
 
-    first = await client.review_requests()
+    first = await client.inbox_list("mine")
     now[0] += 59
-    cached = await client.review_requests()
-    forced = await client.review_requests(refresh=True)
-    now[0] += 61
-    expired = await client.review_requests()
+    again = await client.inbox_list("mine")
 
-    assert [r.number for r in first.team] == [3, 2]
-    assert first.direct == ()
-    assert first.team[0].is_draft and first.team[0].author == "nat"
-    assert cached is first
-    assert forced is not first
-    assert expired is not forced
-    assert len(fake.calls) == 6
+    assert [pr.title for pr in first.inbox_list.items] == ["first"]
+    assert again == (first.inbox_list, False)
+    assert runner.started == 1
+
+
+async def test_stale_read_returns_at_once_with_one_background_refresh() -> None:
+    now = [1000.0]
+    client, runner, fake = _gated_client(now)
+    runner.gate.set()
+    first = (await client.inbox_list("mine")).inbox_list
+    inbox_rule(fake, "mine", gql_page([gql_pr(1, title="second")]))
+    runner.gate.clear()
+    now[0] += 61
+
+    stale = await client.inbox_list("mine")
+    await asyncio.sleep(0)
+    stale_again = await client.inbox_list("mine")
+
+    assert stale == (first, True)
+    assert stale_again == (first, True)
+    assert runner.started == 2
+
+    runner.gate.set()
+    joined = await client.inbox_list("mine", refresh=True)
+    after = await client.inbox_list("mine")
+
+    assert [pr.title for pr in joined.inbox_list.items] == ["second"]
+    assert after == (joined.inbox_list, False)
+    assert runner.started == 2
+
+
+async def test_concurrent_stale_reads_start_one_refresh() -> None:
+    now = [1000.0]
+    client, runner, fake = _gated_client(now)
+    runner.gate.set()
+    first = (await client.inbox_list("mine")).inbox_list
+    inbox_rule(fake, "mine", gql_page([gql_pr(1, title="second")]))
+    runner.gate.clear()
+    now[0] += 61
+
+    reads = await asyncio.gather(*(client.inbox_list("mine") for _ in range(2)))
+    await asyncio.sleep(0)
+
+    assert reads == [(first, True), (first, True)]
+    assert runner.started == 2
+    runner.gate.set()
+    await client.inbox_list("mine", refresh=True)
+    assert runner.started == 2
+
+
+async def test_refresh_true_waits_for_new_data() -> None:
+    now = [1000.0]
+    client, runner, fake = _gated_client(now)
+    runner.gate.set()
+    first = (await client.inbox_list("mine")).inbox_list
+    inbox_rule(fake, "mine", gql_page([gql_pr(1, title="forced")]))
+
+    forced = await client.inbox_list("mine", refresh=True)
+
+    assert forced.inbox_list is not first
+    assert [pr.title for pr in forced.inbox_list.items] == ["forced"]
+    assert client.cached_inbox_list("mine") is forced.inbox_list
+
+
+async def test_failed_background_refresh_keeps_the_list_and_retries() -> None:
+    now = [1000.0]
+    client, runner, fake = _gated_client(now)
+    runner.gate.set()
+    first = (await client.inbox_list("mine")).inbox_list
+    fake.on("graphql", f"q={INBOX_QUERIES['mine']}", code=1, stderr=b"gh: HTTP 401")
+    now[0] += 61
+
+    assert await client.inbox_list("mine") == (first, True)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert client.cached_inbox_list("mine") is first
+    assert await client.inbox_list("mine") == (first, True)
+    await asyncio.sleep(0)
+    assert runner.started == 3
+
+
+async def test_lists_refresh_independently() -> None:
+    fake = FakeGh()
+    for name in ("direct", "mine", "team"):
+        inbox_rule(fake, name, gql_page([gql_pr(1)]))
+    client = GitHubClient(fake)
+
+    await client.inbox_list("direct")
+
+    assert client.cached_inbox_list("direct") is not None
+    assert client.cached_inbox_list("team") is None
+    assert len(fake.calls) == 1
 
 
 def test_repo_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

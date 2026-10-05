@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
+from code_review_mcp.github import INBOX_QUERIES, InboxName
 from code_review_mcp.procs import CommandResult
 
 REPO = "acme/widgets"
@@ -217,3 +218,56 @@ def write_config(home: Path, body: str) -> None:
 
 def mapped_config(home: Path, repo: PrRepo) -> None:
     write_config(home, f'default_repo = "{REPO}"\n\n[repos]\n"{REPO}" = "{repo.clone}"\n')
+
+
+def gql_pr(
+    number: int,
+    *,
+    repo: str = REPO,
+    updated_at: str = "2026-10-05T00:00:00Z",
+    **overrides: object,
+) -> dict[str, object]:
+    """One PullRequest node of the inbox GraphQL search, as GitHub returns it."""
+    node: dict[str, object] = {
+        "number": number,
+        "title": f"PR {number}",
+        "url": f"https://github.com/{repo}/pull/{number}",
+        "repository": {"nameWithOwner": repo},
+        "author": {"__typename": "User", "login": "octocat"},
+        "isDraft": False,
+        "createdAt": "2026-10-01T00:00:00Z",
+        "updatedAt": updated_at,
+        "baseRefName": "main",
+        "headRefName": f"branch-{number}",
+        "additions": 3,
+        "deletions": 1,
+        "changedFiles": 2,
+        "reviewDecision": "REVIEW_REQUIRED",
+        "viewerLatestReview": None,
+        "labels": {"nodes": []},
+        "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]},
+    }
+    node.update(overrides)
+    return node
+
+
+def gql_page(
+    nodes: Sequence[Mapping[str, object]], *, total: int | None = None, cursor: str | None = None
+) -> bytes:
+    """A page of the inbox GraphQL search; `cursor` set means another page follows."""
+    return json.dumps(
+        {
+            "data": {
+                "search": {
+                    "issueCount": len(nodes) if total is None else total,
+                    "pageInfo": {"hasNextPage": cursor is not None, "endCursor": cursor},
+                    "nodes": list(nodes),
+                }
+            }
+        }
+    ).encode()
+
+
+def inbox_rule(fake: FakeGh, name: InboxName, page: bytes, *extra: str) -> None:
+    """Answer the inbox search for list `name` (direct, mine, or team)."""
+    fake.on("graphql", f"q={INBOX_QUERIES[name]}", *extra, stdout=page)

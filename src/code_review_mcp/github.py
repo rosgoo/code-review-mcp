@@ -4,7 +4,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Annotated, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from pydantic.alias_generators import to_camel
@@ -15,10 +15,36 @@ from code_review_mcp.procs import CommandRunner, run_command
 GH_TIMEOUT_SECONDS = 30.0
 INBOX_TTL_SECONDS = 60.0
 INBOX_LIMIT = 100
+INBOX_PAGE_SIZE = 50
 SEARCH_LIMIT = 20
 
-INBOX_FIELDS = "number,title,repository,author,url,updatedAt,isDraft"
-DIRECT_REQUEST_QUERY = "user-review-requested:@me"
+InboxName = Literal["direct", "mine", "team"]
+INBOX_NAMES: tuple[InboxName, ...] = ("direct", "mine", "team")
+INBOX_QUERIES: dict[InboxName, str] = {
+    "direct": "is:pr is:open user-review-requested:@me sort:updated-desc",
+    "mine": "is:pr is:open author:@me sort:updated-desc",
+    "team": "is:pr is:open review-requested:@me -user-review-requested:@me sort:updated-desc",
+}
+INBOX_GRAPHQL = """
+query($q: String!, $first: Int!, $after: String) {
+  search(query: $q, type: ISSUE, first: $first, after: $after) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      ... on PullRequest {
+        number title url
+        repository { nameWithOwner }
+        author { __typename login }
+        isDraft createdAt updatedAt baseRefName headRefName
+        additions deletions changedFiles reviewDecision
+        viewerLatestReview { state }
+        labels(first: 10) { nodes { name } }
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      }
+    }
+  }
+}
+"""
 PR_VIEW_FIELDS = (
     "number,title,body,author,url,state,isDraft,baseRefName,baseRefOid,headRefName,"
     "headRefOid,files,additions,deletions,reviewDecision,reviewRequests,statusCheckRollup"
@@ -28,6 +54,7 @@ BRANCH_LIST_FIELDS = "number,url,state,updatedAt"
 
 _GH_ENV = {"GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "NO_COLOR": "1"}
 _NOT_FOUND = re.compile(r"Could not resolve to a (PullRequest|Repository)|no pull requests? found")
+_RETRYABLE = re.compile(r"HTTP 50[234]")
 
 _NAME = r"[A-Za-z0-9_.-]+"
 _PR_URL = re.compile(
@@ -82,21 +109,37 @@ class ResolvedRef:
 
 
 @dataclass(frozen=True)
-class ReviewRequest:
+class InboxPr:
     repo: str
     number: int
     title: str
-    author: str | None
     url: str
-    updated_at: str
+    author: str | None
+    author_is_bot: bool
     is_draft: bool
+    created_at: str
+    updated_at: str
+    base_ref: str
+    head_ref: str
+    additions: int
+    deletions: int
+    changed_files: int
+    review_decision: str | None
+    viewer_review: str | None
+    labels: tuple[str, ...]
+    ci_state: CheckState | None
 
 
 @dataclass(frozen=True)
-class InboxSnapshot:
-    direct: tuple[ReviewRequest, ...]
-    team: tuple[ReviewRequest, ...]
+class InboxList:
+    total: int
+    items: tuple[InboxPr, ...]
     fetched_at: str
+
+
+class InboxListState(NamedTuple):
+    inbox_list: InboxList
+    refreshing: bool
 
 
 @dataclass(frozen=True)
@@ -221,7 +264,84 @@ class _GhPullRequest(_GhModel):
     status_check_rollup: list[_GhCheck] | None = None
 
 
+class _GqlAuthor(_GhModel):
+    typename: str = Field(default="", alias="__typename")
+    login: str = ""
+
+
+class _GqlRepository(_GhModel):
+    name_with_owner: str
+
+
+class _GqlState(_GhModel):
+    state: str
+
+
+class _GqlLabel(_GhModel):
+    name: str
+
+
+class _GqlLabels(_GhModel):
+    nodes: list[_GqlLabel] = []
+
+
+class _GqlCommit(_GhModel):
+    status_check_rollup: _GqlState | None = None
+
+
+class _GqlCommitNode(_GhModel):
+    commit: _GqlCommit
+
+
+class _GqlCommits(_GhModel):
+    nodes: list[_GqlCommitNode] = []
+
+
+class _GqlPullRequest(_GhModel):
+    number: int
+    title: str
+    url: str
+    repository: _GqlRepository
+    created_at: str
+    updated_at: str
+    author: _GqlAuthor | None = None
+    is_draft: bool = False
+    base_ref_name: str = ""
+    head_ref_name: str = ""
+    additions: int = 0
+    deletions: int = 0
+    changed_files: int = 0
+    review_decision: str | None = None
+    viewer_latest_review: _GqlState | None = None
+    labels: _GqlLabels | None = None
+    commits: _GqlCommits | None = None
+
+
+class _GqlOtherNode(_GhModel):
+    pass
+
+
+class _GqlPageInfo(_GhModel):
+    has_next_page: bool = False
+    end_cursor: str | None = None
+
+
+class _GqlSearch(_GhModel):
+    issue_count: int
+    page_info: _GqlPageInfo = _GqlPageInfo()
+    nodes: list[Annotated[_GqlPullRequest | _GqlOtherNode, Field(union_mode="left_to_right")]] = []
+
+
+class _GqlSearchData(_GhModel):
+    search: _GqlSearch
+
+
+class _GqlSearchResponse(_GhModel):
+    data: _GqlSearchData
+
+
 _SEARCH_ITEMS = TypeAdapter(list[_GhSearchItem])
+_SEARCH_RESPONSE = TypeAdapter(_GqlSearchResponse)
 _LIST_ITEMS = TypeAdapter(list[_GhListItem])
 _PULL_REQUEST = TypeAdapter(_GhPullRequest)
 
@@ -285,6 +405,52 @@ def _to_status_check(check: _GhCheck) -> StatusCheck:
     )
 
 
+_ROLLUP_STATES: dict[str, CheckState] = {
+    "SUCCESS": "success",
+    "FAILURE": "failure",
+    "ERROR": "failure",
+    "PENDING": "pending",
+    "EXPECTED": "pending",
+}
+
+
+def _inbox_pr(pr: _GqlPullRequest) -> InboxPr:
+    commits = pr.commits.nodes if pr.commits else []
+    rollup = commits[-1].commit.status_check_rollup if commits else None
+    return InboxPr(
+        repo=pr.repository.name_with_owner,
+        number=pr.number,
+        title=pr.title,
+        url=pr.url,
+        author=pr.author.login if pr.author else None,
+        author_is_bot=pr.author is not None and pr.author.typename == "Bot",
+        is_draft=pr.is_draft,
+        created_at=pr.created_at,
+        updated_at=pr.updated_at,
+        base_ref=pr.base_ref_name,
+        head_ref=pr.head_ref_name,
+        additions=pr.additions,
+        deletions=pr.deletions,
+        changed_files=pr.changed_files,
+        review_decision=pr.review_decision or None,
+        viewer_review=pr.viewer_latest_review.state if pr.viewer_latest_review else None,
+        labels=tuple(label.name for label in pr.labels.nodes) if pr.labels else (),
+        ci_state=_ROLLUP_STATES.get(rollup.state.upper()) if rollup else None,
+    )
+
+
+def parse_inbox_page(raw: bytes) -> tuple[int, list[InboxPr], str | None]:
+    """Parse one page of the inbox GraphQL search.
+
+    Returns the total match count, the page's PRs, and the cursor of the next page
+    (None on the last page). Raises GitHubError for output that does not fit.
+    """
+    search = _validate(_SEARCH_RESPONSE, raw).data.search
+    prs = [_inbox_pr(node) for node in search.nodes if isinstance(node, _GqlPullRequest)]
+    cursor = search.page_info.end_cursor if search.page_info.has_next_page else None
+    return search.issue_count, prs, cursor
+
+
 def _reviewer_name(request: _GhReviewRequest) -> str:
     return request.login or request.slug or request.name or ""
 
@@ -333,9 +499,9 @@ class GitHubClient:
         self._runner = runner
         self._clock = clock
         self._inbox_ttl = inbox_ttl
-        self._inbox: InboxSnapshot | None = None
-        self._inbox_loaded_at = 0.0
-        self._inbox_lock = asyncio.Lock()
+        self._lists: dict[InboxName, InboxList] = {}
+        self._loaded_at: dict[InboxName, float] = {}
+        self._fetches: dict[InboxName, asyncio.Task[InboxList]] = {}
 
     async def _gh(self, args: Sequence[str]) -> bytes:
         result = await self._runner(["gh", *args], timeout=GH_TIMEOUT_SECONDS, env=_GH_ENV)
@@ -345,63 +511,82 @@ class GitHubClient:
             raise PrNotFoundError(result.describe_failure())
         raise GitHubError(result.describe_failure())
 
-    async def _search_review_requests(self, query: Sequence[str]) -> list[ReviewRequest]:
-        raw = await self._gh(
-            [
-                "search",
-                "prs",
-                *query,
-                "--state=open",
-                "--sort=updated",
-                "--order=desc",
-                f"--limit={INBOX_LIMIT}",
-                f"--json={INBOX_FIELDS}",
-            ]
-        )
-        return sorted(
-            (
-                ReviewRequest(
-                    repo=item.repository.name_with_owner,
-                    number=item.number,
-                    title=item.title,
-                    author=item.author.login if item.author else None,
-                    url=item.url,
-                    updated_at=item.updated_at,
-                    is_draft=item.is_draft,
-                )
-                for item in _validate(_SEARCH_ITEMS, raw)
-            ),
-            key=lambda r: r.updated_at,
-            reverse=True,
-        )
+    async def _search_page(self, name: InboxName, cursor: str | None) -> bytes:
+        args = [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={INBOX_GRAPHQL}",
+            "-f",
+            f"q={INBOX_QUERIES[name]}",
+            "-F",
+            f"first={INBOX_PAGE_SIZE}",
+            *(["-f", f"after={cursor}"] if cursor else []),
+        ]
+        result = await self._runner(args, timeout=GH_TIMEOUT_SECONDS, env=_GH_ENV)
+        if not result.ok and _RETRYABLE.search(result.stderr_text):
+            result = await self._runner(args, timeout=GH_TIMEOUT_SECONDS, env=_GH_ENV)
+        if not result.ok:
+            detail = result.stderr_text or f"exit status {result.returncode}"
+            raise GitHubError(f"GitHub search for the {name!r} inbox list failed: {detail}")
+        return result.stdout
 
-    async def review_requests(self, *, refresh: bool = False) -> InboxSnapshot:
-        """Open PRs that request the user's review, each list newest update first.
+    async def _fetch_list(self, name: InboxName) -> InboxList:
+        items: list[InboxPr] = []
+        total = 0
+        cursor: str | None = None
+        while True:
+            total, page, cursor = parse_inbox_page(await self._search_page(name, cursor))
+            items.extend(page)
+            if cursor is None or len(items) >= INBOX_LIMIT:
+                break
+        newest_first = sorted(items[:INBOX_LIMIT], key=lambda pr: pr.updated_at, reverse=True)
+        fetched = InboxList(
+            total=total, items=tuple(newest_first), fetched_at=datetime.now(UTC).isoformat()
+        )
+        self._lists[name] = fetched
+        self._loaded_at[name] = self._clock()
+        return fetched
 
-        `direct` holds PRs that request the user by name. `team` holds the other PRs that
-        request a team the user is in. Each search returns at most INBOX_LIMIT PRs, the
-        most recently updated ones. The result is cached for the inbox TTL;
-        `refresh=True` bypasses the cache.
+    def _start_fetch(self, name: InboxName) -> asyncio.Task[InboxList]:
+        """Return the list's in-flight fetch, starting one if none runs."""
+        task = self._fetches.get(name)
+        if task is None:
+            task = asyncio.create_task(self._fetch_list(name))
+            self._fetches[name] = task
+            task.add_done_callback(lambda done: self._fetch_finished(name, done))
+        return task
+
+    def _fetch_finished(self, name: InboxName, task: asyncio.Task[InboxList]) -> None:
+        if self._fetches.get(name) is task:
+            del self._fetches[name]
+        if not task.cancelled():
+            # A failed background refresh keeps the previous list; the next stale read retries.
+            task.exception()
+
+    def cached_inbox_list(self, name: InboxName) -> InboxList | None:
+        return self._lists.get(name)
+
+    async def inbox_list(self, name: InboxName, *, refresh: bool = False) -> InboxListState:
+        """One inbox list, newest update first, at most INBOX_LIMIT PRs.
+
+        `direct`: PRs that request the user by name. `mine`: PRs the user wrote. `team`:
+        PRs that request a team the user is in and not the user. `total` counts every match.
+        Each list is fetched in pages of INBOX_PAGE_SIZE, because larger GraphQL searches
+        exceed GitHub's request time limit.
+
+        A cached list returns at once. When it is older than the inbox TTL, one background
+        refresh starts and `refreshing` is True; the next read gets the new list. The first
+        read of a list, and `refresh=True`, wait for fresh data. Concurrent callers share
+        one fetch per list. Raises GitHubError when a fetch that the caller waits for fails.
         """
-        async with self._inbox_lock:
-            if (
-                not refresh
-                and self._inbox is not None
-                and self._clock() - self._inbox_loaded_at < self._inbox_ttl
-            ):
-                return self._inbox
-            direct, requested = await asyncio.gather(
-                self._search_review_requests([DIRECT_REQUEST_QUERY]),
-                self._search_review_requests(["--review-requested=@me"]),
-            )
-            direct_keys = {(r.repo, r.number) for r in direct}
-            self._inbox = InboxSnapshot(
-                direct=tuple(direct),
-                team=tuple(r for r in requested if (r.repo, r.number) not in direct_keys),
-                fetched_at=datetime.now(UTC).isoformat(),
-            )
-            self._inbox_loaded_at = self._clock()
-            return self._inbox
+        cached = self._lists.get(name)
+        if refresh or cached is None:
+            return InboxListState(await asyncio.shield(self._start_fetch(name)), refreshing=False)
+        if self._clock() - self._loaded_at[name] >= self._inbox_ttl:
+            self._start_fetch(name)
+        return InboxListState(cached, refreshing=name in self._fetches)
 
     async def pull_request(self, repo: str, number: int) -> PullRequest:
         """Fetch a PR's metadata. Raises PrNotFoundError if the PR or repo does not exist."""

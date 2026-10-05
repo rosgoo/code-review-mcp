@@ -8,7 +8,7 @@ import pytest
 
 from code_review_mcp.config import Settings
 from code_review_mcp.errors import NotFoundError, ReviewError
-from code_review_mcp.github import GitHubClient
+from code_review_mcp.github import INBOX_QUERIES, GitHubClient
 from code_review_mcp.hub import ReviewHub
 from code_review_mcp.pr_service import PrService
 from code_review_mcp.service import ReviewService
@@ -26,6 +26,9 @@ from .pr_fixtures import (
     FakeGh,
     PrRepo,
     git,
+    gql_page,
+    gql_pr,
+    inbox_rule,
     make_pr_repo,
     mapped_config,
     pr_view_json,
@@ -232,24 +235,56 @@ async def test_close_then_reopen_keeps_review_id(
 
 
 async def test_inbox_links_opened_prs(prs: PrService, fake_gh: FakeGh) -> None:
-    item = {
-        "author": {"login": "octocat"},
-        "isDraft": False,
-        "number": PR_NUMBER,
-        "repository": {"name": "widgets", "nameWithOwner": REPO},
-        "title": "Make x two",
-        "updatedAt": "2026-10-05T00:00:00Z",
-        "url": PR_URL,
-    }
-    other = {**item, "number": 2, "url": f"https://github.com/{REPO}/pull/2"}
-    fake_gh.on("--review-requested=@me", stdout=json.dumps([item, other]).encode())
-    fake_gh.on("user-review-requested:@me", stdout=json.dumps([item]).encode())
+    inbox_rule(fake_gh, "direct", gql_page([gql_pr(PR_NUMBER, title="Make x two")]))
+    inbox_rule(fake_gh, "mine", gql_page([gql_pr(3, author={"__typename": "User", "login": "me"})]))
+    inbox_rule(fake_gh, "team", gql_page([gql_pr(2)], total=40))
     review_id = (await prs.open_pr(PR_URL)).review.id
 
     inbox = _plain(await prs.inbox())
 
-    assert [(i["number"], i["review_id"]) for i in inbox["direct"]] == [(PR_NUMBER, review_id)]
-    assert [(i["number"], i["review_id"]) for i in inbox["team"]] == [(2, None)]
+    assert set(inbox) == {"fetched_at", "direct", "mine", "team"}
+    direct, mine, team = (inbox[name] for name in ("direct", "mine", "team"))
+    assert [(i["number"], i["review_id"]) for i in direct["items"]] == [(PR_NUMBER, review_id)]
+    assert [(i["number"], i["author"], i["review_id"]) for i in mine["items"]] == [(3, "me", None)]
+    assert (team["total"], [i["number"] for i in team["items"]]) == (40, [2])
+    assert set(direct["items"][0]) == {
+        "repo",
+        "number",
+        "title",
+        "url",
+        "author",
+        "author_is_bot",
+        "is_draft",
+        "created_at",
+        "updated_at",
+        "base_ref",
+        "head_ref",
+        "additions",
+        "deletions",
+        "changed_files",
+        "review_decision",
+        "viewer_review",
+        "labels",
+        "ci_state",
+        "review_id",
+    }
+
+
+async def test_inbox_lists_load_alone_and_team_leaves_out_direct(
+    prs: PrService, fake_gh: FakeGh
+) -> None:
+    inbox_rule(fake_gh, "direct", gql_page([gql_pr(5)]))
+    inbox_rule(fake_gh, "team", gql_page([gql_pr(5), gql_pr(6)], total=2))
+
+    team_before_direct = _plain(await prs.inbox_list("team"))
+    direct = _plain(await prs.inbox_list("direct"))
+    team_after_direct = _plain(await prs.inbox_list("team"))
+
+    assert set(direct) == {"name", "total", "fetched_at", "refreshing", "items"}
+    assert (direct["name"], direct["refreshing"]) == ("direct", False)
+    assert [i["number"] for i in team_before_direct["items"]] == [5, 6]
+    assert [i["number"] for i in team_after_direct["items"]] == [6]
+    assert fake_gh.calls_with(f"q={INBOX_QUERIES['mine']}") == []
 
 
 async def test_local_and_unknown_reviews_are_rejected(

@@ -1,12 +1,18 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  InboxControlsBar,
+  InboxSection,
+  useInboxControls,
+  useInboxLists,
+} from "../components/InboxLists";
 import { Link } from "../components/Link";
 import { errorMessage } from "../components/Thread";
 import { api } from "../lib/api";
 import { useElapsedSeconds } from "../lib/hooks";
-import { filterItems, prLabel, recentLabel } from "../lib/inbox";
+import { INBOX_NAMES, authorsOf, recentLabel } from "../lib/inbox";
 import { navigate, reviewPath } from "../lib/router";
 import { formatAge } from "../lib/time";
-import type { Inbox as InboxData, InboxItem, ReviewSummary } from "../lib/types";
+import type { ReviewSummary } from "../lib/types";
 
 const newestFirst = (a: ReviewSummary, b: ReviewSummary) =>
   b.created_at.localeCompare(a.created_at);
@@ -54,109 +60,6 @@ function OpenProgress({ opening }: { opening: Opening }) {
   );
 }
 
-function InboxRow({
-  item,
-  disabled,
-  onOpen,
-}: {
-  item: InboxItem;
-  disabled: boolean;
-  onOpen(ref: string): void;
-}) {
-  const content = (
-    <>
-      <span className="pr-ref">{prLabel(item.repo, item.number)}</span>
-      <span className="inbox-title">{item.title}</span>
-      {item.is_draft && <span className="tag">Draft</span>}
-      {item.review_id && <span className="tag tag-opened">Opened</span>}
-      <span className="muted inbox-author">{item.author ?? "unknown"}</span>
-      <time className="muted inbox-time" dateTime={item.updated_at} title={item.updated_at}>
-        {formatAge(item.updated_at)}
-      </time>
-    </>
-  );
-  return (
-    <li>
-      {item.review_id ? (
-        <Link to={reviewPath(item.review_id)} className="inbox-row">
-          {content}
-        </Link>
-      ) : (
-        <button
-          type="button"
-          className="inbox-row"
-          disabled={disabled}
-          onClick={() => onOpen(item.url)}
-        >
-          {content}
-        </button>
-      )}
-    </li>
-  );
-}
-
-function ItemList({
-  items,
-  disabled,
-  onOpen,
-  empty,
-}: {
-  items: readonly InboxItem[];
-  disabled: boolean;
-  onOpen(ref: string): void;
-  empty: string;
-}) {
-  if (items.length === 0) return <p className="muted list-empty">{empty}</p>;
-  return (
-    <ul className="review-list">
-      {items.map((item) => (
-        <InboxRow
-          key={`${item.repo}#${item.number}`}
-          item={item}
-          disabled={disabled}
-          onOpen={onOpen}
-        />
-      ))}
-    </ul>
-  );
-}
-
-function TeamRequests({
-  items,
-  disabled,
-  onOpen,
-}: {
-  items: readonly InboxItem[];
-  disabled: boolean;
-  onOpen(ref: string): void;
-}) {
-  const [query, setQuery] = useState("");
-  const shown = filterItems(items, query);
-  return (
-    <details className="inbox-section team-section">
-      <summary>
-        <h3>Requested from your teams</h3>
-        <span className="count">
-          {query.trim() ? `${shown.length} of ${items.length}` : items.length}
-        </span>
-      </summary>
-      <input
-        type="search"
-        className="team-filter"
-        placeholder="Filter by repo, #number, title, or author"
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-      />
-      <ItemList
-        items={shown}
-        disabled={disabled}
-        onOpen={onOpen}
-        empty={items.length === 0 ? "No team review requests." : "No requests match the filter."}
-      />
-    </details>
-  );
-}
-
 function RecentReviews({ reviews }: { reviews: readonly ReviewSummary[] }) {
   if (reviews.length === 0) {
     return (
@@ -193,34 +96,31 @@ function RecentReviews({ reviews }: { reviews: readonly ReviewSummary[] }) {
 }
 
 export function Inbox() {
-  const [inbox, setInbox] = useState<InboxData | null>(null);
-  const [inboxError, setInboxError] = useState<string | null>(null);
+  const { states, load, refreshAll } = useInboxLists();
   const [refreshing, setRefreshing] = useState(false);
   const [reviews, setReviews] = useState<ReviewSummary[] | null>(null);
   const [reviewsError, setReviewsError] = useState<string | null>(null);
   const [ref, setRef] = useState("");
+  const [controls, setControls] = useInboxControls();
   const opener = usePrOpener();
-
-  const loadInbox = useCallback(async (refresh: boolean) => {
-    setRefreshing(true);
-    try {
-      setInbox(await api.inbox(refresh));
-      setInboxError(null);
-    } catch (e) {
-      setInboxError(errorMessage(e));
-    } finally {
-      setRefreshing(false);
-    }
-  }, []);
+  const authors = useMemo(
+    () => authorsOf(INBOX_NAMES.map((name) => states[name].list?.items ?? [])),
+    [states],
+  );
 
   useEffect(() => {
     document.title = "Code Review";
-    void loadInbox(false);
     api.listReviews().then(
       (list) => setReviews([...list].sort(newestFirst)),
       (e: unknown) => setReviewsError(errorMessage(e)),
     );
-  }, [loadInbox]);
+  }, []);
+
+  async function refreshInbox() {
+    setRefreshing(true);
+    await refreshAll();
+    setRefreshing(false);
+  }
 
   function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -255,41 +155,49 @@ export function Inbox() {
 
         <section className="inbox-section">
           <div className="section-header">
-            <h2>Review requests</h2>
-            {inbox && (
-              <span className="muted" title={inbox.fetched_at}>
-                updated {formatAge(inbox.fetched_at)}
-              </span>
-            )}
+            <h2>Pull requests</h2>
             <span className="spacer" />
             <button
               type="button"
               className="button"
               disabled={refreshing}
-              onClick={() => void loadInbox(true)}
+              onClick={() => void refreshInbox()}
             >
               {refreshing ? "Refreshing…" : "Refresh"}
             </button>
           </div>
-          {inboxError && <p className="form-error">Could not load review requests: {inboxError}</p>}
-          {inbox === null && !inboxError && <p className="muted">Loading review requests…</p>}
-          {inbox && (
-            <>
-              <div className="inbox-section direct-section">
-                <div className="section-header">
-                  <h3>Requested from you</h3>
-                  <span className="count">{inbox.direct.length}</span>
-                </div>
-                <ItemList
-                  items={inbox.direct}
-                  disabled={opening}
-                  onOpen={onOpen}
-                  empty="Nothing requests your review directly."
-                />
-              </div>
-              <TeamRequests items={inbox.team} disabled={opening} onOpen={onOpen} />
-            </>
-          )}
+          <InboxControlsBar controls={controls} authors={authors} onChange={setControls} />
+          <InboxSection
+            title="Requested from you"
+            className="direct-section"
+            state={states.direct}
+            controls={controls}
+            disabled={opening}
+            onOpen={onOpen}
+            onRetry={() => void load("direct")}
+            empty="Nothing requests your review directly."
+          />
+          <InboxSection
+            title="Your PRs"
+            className="mine-section"
+            state={states.mine}
+            controls={controls}
+            disabled={opening}
+            onOpen={onOpen}
+            onRetry={() => void load("mine")}
+            empty="You have no open PRs."
+          />
+          <InboxSection
+            title="Requested from your teams"
+            className="team-section"
+            state={states.team}
+            controls={controls}
+            disabled={opening}
+            onOpen={onOpen}
+            onRetry={() => void load("team")}
+            collapsible
+            empty="No team review requests."
+          />
         </section>
 
         <section className="inbox-section">

@@ -98,17 +98,33 @@ export interface InboxItem {
   repo: string;
   number: number;
   title: string;
-  author: string | null;
   url: string;
-  updated_at: string;
+  author: string | null;
+  author_is_bot: boolean;
   is_draft: boolean;
+  created_at: string;
+  updated_at: string;
+  base_ref: string;
+  head_ref: string;
+  additions: number;
+  deletions: number;
+  changed_files: number;
+  review_decision: string | null;
+  viewer_review: string | null;
+  labels: string[];
+  ci_state: CheckState | null;
   review_id: string | null;
 }
 
-export interface Inbox {
+export type InboxName = "direct" | "mine" | "team";
+
+export interface InboxList {
+  name: InboxName;
+  total: number;
   fetched_at: string;
-  direct: InboxItem[];
-  team: InboxItem[];
+  /** True while the daemon refreshes a stale copy in the background. */
+  refreshing: boolean;
+  items: InboxItem[];
 }
 
 export interface OpenedPr {

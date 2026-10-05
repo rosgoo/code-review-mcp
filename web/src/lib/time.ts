@@ -12,3 +12,18 @@ export function formatAge(iso: string, now: number = Date.now()): string {
   if (elapsed < 7 * DAY) return `${Math.floor(elapsed / DAY)}d ago`;
   return new Date(then).toLocaleDateString();
 }
+
+const WEEK = 7 * DAY;
+
+/** A compact duration since `iso`: 5m, 3h, 6d, 5w, 4mo, 2y. */
+export function formatSince(iso: string, now: number = Date.now()): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return "";
+  const elapsed = Math.max(0, now - then);
+  if (elapsed < HOUR) return `${Math.floor(elapsed / MINUTE)}m`;
+  if (elapsed < DAY) return `${Math.floor(elapsed / HOUR)}h`;
+  if (elapsed < 2 * WEEK) return `${Math.floor(elapsed / DAY)}d`;
+  if (elapsed < 9 * WEEK) return `${Math.floor(elapsed / WEEK)}w`;
+  if (elapsed < 365 * DAY) return `${Math.floor(elapsed / (30 * DAY))}mo`;
+  return `${Math.floor(elapsed / (365 * DAY))}y`;
+}
