@@ -394,7 +394,12 @@ async def test_submit_posts_every_draft_once(
     assert review is not None and review.last_reviewed_sha == pr_repo.head_sha
     events = [json.loads(queue.get_nowait()) for _ in range(queue.qsize())]
     assert events[-1]["type"] == "review_submitted"
-    assert events[-1]["posted"] == 4
+    assert {k: events[-1][k] for k in ("github_review_id", "html_url", "event", "posted")} == {
+        "github_review_id": 900,
+        "html_url": f"https://github.com/{REPO}/pull/1#pullrequestreview-900",
+        "event": "COMMENT",
+        "posted": 4,
+    }
     listed = (await api.get(f"/api/reviews/{review_id}/threads")).json()
     assert listed[0]["github_url"].endswith("discussion_r1000")
     view = (await api.get(f"/api/reviews/{review_id}/pr")).json()
@@ -612,3 +617,20 @@ async def test_head_move_stales_every_draft_when_the_old_head_is_unreadable(
 
     row = store.get_thread(thread.id)
     assert row is not None and row.status == "stale"
+
+
+async def test_thread_sse_payloads(api: httpx.AsyncClient, app: FastAPI, review_id: str) -> None:
+    queue = app.state.prs._hub.subscribe(review_id)
+
+    created = await _create(api, review_id, {**FILE, "side": "additions"})
+    updated = (await api.patch(f"/api/threads/{created['id']}", json={"body": "edited"})).json()
+    await api.delete(f"/api/threads/{created['id']}")
+    listed = (await api.get(f"/api/reviews/{review_id}/threads")).json()
+
+    events = [json.loads(queue.get_nowait()) for _ in range(queue.qsize())]
+    assert [e["type"] for e in events] == ["thread_added", "thread_updated", "thread_deleted"]
+    assert events[0]["thread"] == created
+    assert events[1]["thread"] == updated
+    assert events[2]["thread_id"] == created["id"]
+    assert (created["side"], created["line"]) == ("additions", 0)
+    assert listed == []

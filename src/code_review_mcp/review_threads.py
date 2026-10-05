@@ -315,6 +315,6 @@ class ThreadService:
         self._hub.publish(
             review_id,
             "review_submitted",
-            {**result, "thread_ids": [d.thread_id for d in drafts]},
+            {**result, "event": event, "thread_ids": [d.thread_id for d in drafts]},
         )
         return result
