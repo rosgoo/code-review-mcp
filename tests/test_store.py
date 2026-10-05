@@ -13,6 +13,7 @@ from code_review_mcp.store import (
     ReviewFile,
     SchemaVersionError,
     Store,
+    ThreadPosting,
     ThreadStatus,
     WorktreeCounts,
 )
@@ -73,9 +74,20 @@ EXPECTED_COLUMNS = {
         "created_by",
         "created_at",
         "updated_at",
+        "github_comment_id",
+        "github_url",
     },
     "messages": {"id", "thread_id", "author", "body", "created_at"},
-    "submissions": {"id", "review_id", "event", "body", "github_review_id", "submitted_at"},
+    "submissions": {
+        "id",
+        "review_id",
+        "event",
+        "body",
+        "github_review_id",
+        "submitted_at",
+        "html_url",
+        "commit_id",
+    },
     "viewed_files": {"review_id", "path", "head_sha", "viewed_at"},
 }
 
@@ -418,7 +430,7 @@ def test_migration_3_backfills_last_activity(tmp_path: Path) -> None:
     store = Store.open(db_path)
     try:
         review = store.get_review("old")
-        assert store.schema_version == 3
+        assert store.schema_version == len(MIGRATIONS)
         assert review is not None
         assert review.last_activity_at == "2026-02-01T00:00:00+00:00"
     finally:
@@ -491,8 +503,62 @@ def test_thread_activity(store: Store) -> None:
     )
 
     assert store.latest_thread_update(review.id) == thread.updated_at
-    assert store.delete_draft_thread(thread.id) is True
+    assert store.delete_unposted_thread(thread.id) is True
     deleted = store.get_review(review.id)
     assert deleted is not None and deleted.last_activity_at is not None
     assert deleted.last_activity_at > "2026"
     assert store.latest_thread_update(review.id) is None
+
+
+def test_migration_4_adds_github_ids(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        "BEGIN;\n" + "\n".join(MIGRATIONS[:3]) + "\nPRAGMA user_version = 3;\nCOMMIT;"
+    )
+    now = "2026-10-05T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO reviews (id, kind, title, created_at, updated_at)"
+        " VALUES ('r', 'pr', 'PR', ?, ?)",
+        (now, now),
+    )
+    conn.execute(
+        "INSERT INTO threads (id, review_id, kind, path, side, line, status, created_by,"
+        " created_at, updated_at) VALUES ('t', 'r', 'review_comment', 'a.py', 'additions', 1,"
+        " 'draft', 'user', ?, ?)",
+        (now, now),
+    )
+    conn.execute(
+        "INSERT INTO submissions (id, review_id, event, body, submitted_at)"
+        " VALUES ('s', 'r', 'COMMENT', 'old', ?)",
+        (now,),
+    )
+    conn.commit()
+    conn.close()
+
+    store = Store.open(db_path)
+    try:
+        thread = store.get_thread("t")
+        [submission] = store.list_submissions("r")
+        assert store.schema_version == 4
+        assert thread is not None
+        assert (thread.github_comment_id, thread.github_url) == (None, None)
+        assert (submission.html_url, submission.commit_id) == (None, None)
+
+        recorded = store.record_submission(
+            "r",
+            event="COMMENT",
+            body="new",
+            github_review_id=5,
+            html_url="https://github.com/o/r/pull/1#pullrequestreview-5",
+            commit_id="c" * 40,
+            postings=[ThreadPosting("t", 77, "https://github.com/o/r/pull/1#discussion_r77")],
+        )
+        posted = store.get_thread("t")
+        review = store.get_review("r")
+    finally:
+        store.close()
+    assert posted is not None
+    assert (posted.status, posted.github_comment_id) == ("posted", 77)
+    assert recorded.commit_id == "c" * 40
+    assert review is not None and review.last_reviewed_sha == "c" * 40

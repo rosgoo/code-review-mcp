@@ -502,6 +502,7 @@ class GitHubClient:
         self._lists: dict[InboxName, InboxList] = {}
         self._loaded_at: dict[InboxName, float] = {}
         self._fetches: dict[InboxName, asyncio.Task[InboxList]] = {}
+        self._viewer_login: str | None = None
 
     async def _gh(self, args: Sequence[str]) -> bytes:
         result = await self._runner(["gh", *args], timeout=GH_TIMEOUT_SECONDS, env=_GH_ENV)
@@ -688,6 +689,23 @@ class GitHubClient:
             for item in _validate(_LIST_ITEMS, raw)
         ]
         return _pick_candidate(candidates, f"branch {parsed.branch!r} in {default_repo}")
+
+    @property
+    def runner(self) -> CommandRunner:
+        return self._runner
+
+    async def viewer_login(self) -> str:
+        """The login of the user `gh` is authenticated as, cached for the client's lifetime."""
+        if self._viewer_login is None:
+            self._viewer_login = _validate(_VIEWER, await self._gh(["api", "user"])).login
+        return self._viewer_login
+
+
+class _GhViewer(_GhModel):
+    login: str
+
+
+_VIEWER = TypeAdapter(_GhViewer)
 
 
 def _validate[T](adapter: TypeAdapter[T], raw: bytes) -> T:

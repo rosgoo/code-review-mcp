@@ -81,9 +81,9 @@ agent -> update_diff(review_id, ...)      ──► browser refreshes in place
 agent -> wait_for_comments(review_id)     ══► [blocks again for next round]
 ```
 
-## PR mode (read-only)
+## PR mode
 
-The daemon can open any GitHub PR for review. It reads GitHub through the `gh` CLI, which must be installed and logged in. The daemon never handles a token, and nothing in this mode writes to GitHub.
+The daemon can open any GitHub PR for review. It talks to GitHub through the `gh` CLI, which must be installed and logged in. The daemon never handles a token. The only write to GitHub is the submit of a review (see below), and only the `submit-review` route does it. No MCP tool writes to GitHub.
 
 Optional config in `<data dir>/config.toml` (read on each request, so no restart is needed):
 
@@ -134,6 +134,23 @@ The inbox comes from GitHub's GraphQL search, one `gh api graphql` request per l
 In the browser, `/` has an Open box (any ref form above), then three lists: requested from you, your PRs, and requested from your teams (collapsed). One set of controls sorts them (updated, created, author, CI, size) and filters them (text, author, CI state, drafts, bots); the browser keeps your choice. A PR whose base branch is another listed PR's head branch nests under it with its place in the stack, such as 3/11. Recent reviews follow. A PR review page shows the PR's refs, CI checks, and review decision; the worktree path, with buttons that copy the path or `cd <path> && claude` (the daemon force-checks-out this worktree when new commits arrive, so edits there are lost); a file tree with a Viewed checkbox per file (a viewed file collapses); and one diff per file, loaded when you scroll near it. Refresh re-reads the PR. When the head moves, a banner offers a reload. Close review removes the worktree. PR pages have no commenting yet.
 
 Code: `github.py` (`gh` calls, ref parsing), `worktrees.py` (git), `pr_service.py`, `pr_web.py` (routes), `repo_config.py` (`config.toml`).
+
+## Review comments and submit
+
+A PR review holds draft review comments until you submit them as one GitHub review.
+
+- A comment is on one line, a range of lines, or the whole file (`line: 0`). A line comment must be inside a diff hunk: GitHub rejects other lines. `GET /api/reviews/{id}/file` lists the commentable ranges per side.
+- `additions` is GitHub's `RIGHT` side and `deletions` is `LEFT`.
+- When the PR head moves, a draft on a file whose diff did not change follows the new head. Every other draft becomes `stale`. A stale comment must be moved (`PATCH` with a new position) or deleted before submit.
+- Submit posts one review on the current head: it creates a pending review with the line comments, adds each file comment, and submits the review as `COMMENT`, `APPROVE`, or `REQUEST_CHANGES`. If a step fails, the pending review is deleted and nothing is marked posted. On your own PR, GitHub allows only `COMMENT`. `COMMENT` and `REQUEST_CHANGES` need a body.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/reviews/{id}/threads` | Every thread with its messages and GitHub URL |
+| `POST /api/reviews/{id}/threads` | Add a draft review comment `{kind: "review_comment", path, side, line, start_line?, start_side?, body}` |
+| `PATCH /api/threads/{id}` | Edit a draft's `body`, or move a draft or stale comment (`side`, `line`, `start_line?`, `start_side?`) |
+| `DELETE /api/threads/{id}` | Delete a draft or stale thread |
+| `POST /api/reviews/{id}/submit-review` | `{event, body}` → `{github_review_id, html_url, posted}`; 403 for an event GitHub does not allow you, 409 with `stale_thread_ids` while a comment is stale |
 
 ## HTTP API
 

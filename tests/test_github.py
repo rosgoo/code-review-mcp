@@ -445,10 +445,11 @@ class GatedRunner:
         timeout: float,
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
+        stdin: bytes | None = None,
     ) -> CommandResult:
         self.started += 1
         await self.gate.wait()
-        return await self.fake(args, timeout=timeout, cwd=cwd, env=env)
+        return await self.fake(args, timeout=timeout, cwd=cwd, env=env, stdin=stdin)
 
 
 def _gated_client(now: list[float]) -> tuple[GitHubClient, GatedRunner, FakeGh]:

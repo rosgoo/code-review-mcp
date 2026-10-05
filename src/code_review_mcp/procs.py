@@ -47,6 +47,7 @@ class CommandRunner(Protocol):
         timeout: float,
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
+        stdin: bytes | None = None,
     ) -> CommandResult: ...
 
 
@@ -56,8 +57,9 @@ async def run_command(
     timeout: float,
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
+    stdin: bytes | None = None,
 ) -> CommandResult:
-    """Run `args` with no stdin and capture stdout and stderr.
+    """Run `args`, write `stdin` (or nothing) to its input, and capture stdout and stderr.
 
     `env` entries are added to the daemon's environment. The process is killed on timeout
     or cancellation. Raises CommandError if the executable is missing or the timeout expires;
@@ -66,7 +68,7 @@ async def run_command(
     try:
         process = await asyncio.create_subprocess_exec(
             *args,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.DEVNULL if stdin is None else asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
@@ -75,7 +77,7 @@ async def run_command(
     except FileNotFoundError as e:
         raise CommandError(f"{args[0]!r} is not installed or not on PATH") from e
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
+        stdout, stderr = await asyncio.wait_for(process.communicate(stdin), timeout)
     except TimeoutError:
         raise CommandError(f"`{shlex.join(args)}` timed out after {timeout:g}s") from None
     finally:

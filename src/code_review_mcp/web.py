@@ -16,13 +16,21 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from code_review_mcp.cleanup import WorktreeSweeper
 from code_review_mcp.config import Settings
-from code_review_mcp.errors import ConflictError, NotFoundError, ReviewError
+from code_review_mcp.errors import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ReviewError,
+    StaleThreadsError,
+)
 from code_review_mcp.github import GitHubClient
+from code_review_mcp.github_reviews import GitHubReviewWriter
 from code_review_mcp.hub import ReviewHub
 from code_review_mcp.models import CommentRequest, ReplyRequest
 from code_review_mcp.pr_service import PrService
 from code_review_mcp.pr_web import build_pr_router
 from code_review_mcp.repo_config import load_repo_config
+from code_review_mcp.review_threads import ThreadService
 from code_review_mcp.service import ReviewService
 from code_review_mcp.store import Store
 from code_review_mcp.tools import build_mcp, transport_security
@@ -169,6 +177,9 @@ def create_app(
         worktrees or WorktreeManager(settings.home, credential_helper=gh_credential_helper()),
     )
     sweeper = WorktreeSweeper(store, prs, github_client, lambda: load_repo_config(settings.home))
+    threads = ThreadService(
+        store, hub, prs, github_client, GitHubReviewWriter(github_client.runner)
+    )
     security = transport_security(settings)
     mcp = build_mcp(service, prs, security)
     mcp_app = mcp.streamable_http_app()
@@ -196,6 +207,7 @@ def create_app(
     )
     app.state.service = service
     app.state.prs = prs
+    app.state.threads = threads
     app.state.sweeper = sweeper
     app.state.mcp = mcp
 
@@ -209,6 +221,16 @@ def create_app(
     async def not_found(_: Request, exc: NotFoundError) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=404)
 
+    @app.exception_handler(StaleThreadsError)
+    async def stale_threads(_: Request, exc: StaleThreadsError) -> JSONResponse:
+        return JSONResponse(
+            {"error": str(exc), "stale_thread_ids": exc.thread_ids}, status_code=409
+        )
+
+    @app.exception_handler(ForbiddenError)
+    async def forbidden(_: Request, exc: ForbiddenError) -> JSONResponse:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+
     @app.exception_handler(ConflictError)
     async def conflict(_: Request, exc: ConflictError) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=409)
@@ -218,7 +240,7 @@ def create_app(
         return JSONResponse({"error": str(exc)}, status_code=400)
 
     app.include_router(build_api_router(service, hub, store))
-    app.include_router(build_pr_router(prs))
+    app.include_router(build_pr_router(prs, threads))
     # Mount("/mcp") would answer POST /mcp with a 307 to /mcp/, so add the route itself.
     app.router.routes.extend(mcp_app.routes)
     app.mount("/static", RevalidatedStaticFiles(directory=STATIC_DIR), name="static")

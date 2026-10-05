@@ -180,13 +180,18 @@ class ReviewService:
         return thread
 
     def delete_thread(self, thread_id: str) -> None:
-        """Delete a draft thread. Raises ConflictError if the thread is no longer a draft."""
+        """Delete a draft or stale thread. Raises ConflictError for any other status."""
         thread = self._require_thread(thread_id)
-        if not self._store.delete_draft_thread(thread_id):
+        if not self._store.delete_unposted_thread(thread_id):
             raise ConflictError(
-                f"Thread {thread_id!r} is {thread.status}; only a draft can be deleted"
+                f"Thread {thread_id!r} is {thread.status}; only a draft or stale thread can be "
+                "deleted"
             )
-        self._hub.publish(thread.review_id, "thread_deleted", {"comment_id": thread_id})
+        self._hub.publish(
+            thread.review_id,
+            "thread_deleted",
+            {"comment_id": thread_id, "thread_id": thread_id},
+        )
 
     def submit(self, review_id: str) -> int:
         """Move the review's draft threads to submitted and wake its waiters.

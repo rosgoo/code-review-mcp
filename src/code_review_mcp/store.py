@@ -113,6 +113,12 @@ MIGRATIONS: list[str] = [
     ALTER TABLE reviews ADD COLUMN last_activity_at TEXT;
     UPDATE reviews SET last_activity_at = updated_at;
     """,
+    """
+    ALTER TABLE threads ADD COLUMN github_comment_id INTEGER;
+    ALTER TABLE threads ADD COLUMN github_url TEXT;
+    ALTER TABLE submissions ADD COLUMN html_url TEXT;
+    ALTER TABLE submissions ADD COLUMN commit_id TEXT;
+    """,
 ]
 
 
@@ -205,6 +211,14 @@ class ThreadRow:
     created_by: Author
     created_at: str
     updated_at: str
+    github_comment_id: int | None
+    github_url: str | None
+
+
+class ThreadPosting(NamedTuple):
+    thread_id: str
+    github_comment_id: int | None
+    github_url: str | None
 
 
 @dataclass(frozen=True)
@@ -224,6 +238,8 @@ class SubmissionRow:
     body: str
     github_review_id: int | None
     submitted_at: str
+    html_url: str | None
+    commit_id: str | None
 
 
 def new_id() -> str:
@@ -615,21 +631,69 @@ class Store:
             (status, utc_now(), thread_id),
         )
 
-    def delete_draft_thread(self, thread_id: str) -> bool:
-        """Delete the thread and its messages if its status is draft. Returns whether it did.
+    def delete_unposted_thread(self, thread_id: str) -> bool:
+        """Delete the thread and its messages if its status is draft or stale.
 
-        A deletion counts as activity on the thread's review.
+        Returns whether it did. A deletion counts as activity on the thread's review.
         """
         with self._transaction():
             self._conn.execute(
                 "UPDATE reviews SET last_activity_at = ?"
-                " WHERE id = (SELECT review_id FROM threads WHERE id = ? AND status = 'draft')",
+                " WHERE id = (SELECT review_id FROM threads"
+                "  WHERE id = ? AND status IN ('draft', 'stale'))",
                 (timestamp(datetime.now(UTC)), thread_id),
             )
             cursor = self._conn.execute(
-                "DELETE FROM threads WHERE id = ? AND status = 'draft'", (thread_id,)
+                "DELETE FROM threads WHERE id = ? AND status IN ('draft', 'stale')", (thread_id,)
             )
         return cursor.rowcount > 0
+
+    def update_first_message(self, thread_id: str, body: str) -> None:
+        now = utc_now()
+        with self._transaction():
+            self._conn.execute(
+                "UPDATE messages SET body = ? WHERE id = ("
+                " SELECT id FROM messages WHERE thread_id = ? ORDER BY created_at, rowid LIMIT 1)",
+                (body, thread_id),
+            )
+            self._conn.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (now, thread_id))
+
+    def reanchor_thread(
+        self,
+        thread_id: str,
+        *,
+        side: Side,
+        line: int,
+        start_line: int | None,
+        start_side: Side | None,
+        anchor_sha: str,
+    ) -> None:
+        """Move the thread to a new position at `anchor_sha` and set its status to draft."""
+        self._conn.execute(
+            "UPDATE threads SET side = ?, line = ?, start_line = ?, start_side = ?,"
+            " anchor_sha = ?, status = 'draft', updated_at = ? WHERE id = ?",
+            (side, line, start_line, start_side, anchor_sha, utc_now(), thread_id),
+        )
+
+    def move_thread_anchor(self, thread_id: str, anchor_sha: str) -> None:
+        self._conn.execute(
+            "UPDATE threads SET anchor_sha = ?, updated_at = ? WHERE id = ?",
+            (anchor_sha, utc_now(), thread_id),
+        )
+
+    def thread_status_counts(self, review_id: str, *, kind: ThreadKind) -> dict[str, int]:
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) FROM threads WHERE review_id = ? AND kind = ? GROUP BY status",
+            (review_id, kind),
+        ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def mark_threads_stale(self, thread_ids: Sequence[str]) -> None:
+        now = utc_now()
+        self._conn.executemany(
+            "UPDATE threads SET status = 'stale', updated_at = ? WHERE id = ?",
+            [(now, thread_id) for thread_id in thread_ids],
+        )
 
     def move_threads(
         self,
@@ -691,6 +755,8 @@ class Store:
         event: SubmissionEvent,
         body: str,
         github_review_id: int | None = None,
+        html_url: str | None = None,
+        commit_id: str | None = None,
     ) -> SubmissionRow:
         submission = SubmissionRow(
             id=new_id(),
@@ -699,10 +765,12 @@ class Store:
             body=body,
             github_review_id=github_review_id,
             submitted_at=utc_now(),
+            html_url=html_url,
+            commit_id=commit_id,
         )
         self._conn.execute(
-            "INSERT INTO submissions (id, review_id, event, body, github_review_id, submitted_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO submissions (id, review_id, event, body, github_review_id,"
+            " submitted_at, html_url, commit_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 submission.id,
                 review_id,
@@ -710,8 +778,43 @@ class Store:
                 body,
                 github_review_id,
                 submission.submitted_at,
+                html_url,
+                commit_id,
             ),
         )
+        return submission
+
+    def record_submission(
+        self,
+        review_id: str,
+        *,
+        event: SubmissionEvent,
+        body: str,
+        github_review_id: int,
+        html_url: str | None,
+        commit_id: str,
+        postings: Sequence[ThreadPosting],
+    ) -> SubmissionRow:
+        """In one transaction: add the submission, mark each posted thread `posted` with its
+        GitHub ids, and set the review's last reviewed SHA to `commit_id`."""
+        now = utc_now()
+        with self._transaction():
+            submission = self.add_submission(
+                review_id,
+                event=event,
+                body=body,
+                github_review_id=github_review_id,
+                html_url=html_url,
+                commit_id=commit_id,
+            )
+            self._conn.executemany(
+                "UPDATE threads SET status = 'posted', github_comment_id = ?, github_url = ?,"
+                " updated_at = ? WHERE id = ?",
+                [(p.github_comment_id, p.github_url, now, p.thread_id) for p in postings],
+            )
+            self._conn.execute(
+                "UPDATE reviews SET last_reviewed_sha = ? WHERE id = ?", (commit_id, review_id)
+            )
         return submission
 
     def list_submissions(self, review_id: str) -> list[SubmissionRow]:

@@ -1,7 +1,8 @@
 import asyncio
+import re
 import shlex
 import shutil
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, NamedTuple
@@ -58,6 +59,42 @@ class BlobContent:
     size: int
     binary: bool
     too_large: bool
+
+
+@dataclass(frozen=True)
+class Hunk:
+    old_start: int
+    old_count: int
+    new_start: int
+    new_count: int
+
+    @property
+    def old_lines(self) -> range:
+        return range(self.old_start, self.old_start + self.old_count)
+
+    @property
+    def new_lines(self) -> range:
+        return range(self.new_start, self.new_start + self.new_count)
+
+
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def parse_hunks(diff_text: str) -> list[Hunk]:
+    """The hunks of a unified diff, from its `@@ -a,b +c,d @@` headers (a missing count is 1)."""
+    hunks: list[Hunk] = []
+    for line in diff_text.splitlines():
+        match = _HUNK_HEADER.match(line)
+        if match:
+            hunks.append(
+                Hunk(
+                    old_start=int(match[1]),
+                    old_count=int(match[2]) if match[2] is not None else 1,
+                    new_start=int(match[3]),
+                    new_count=int(match[4]) if match[4] is not None else 1,
+                )
+            )
+    return hunks
 
 
 @dataclass(frozen=True)
@@ -355,6 +392,39 @@ class WorktreeManager:
                 )
             )
         return files
+
+    async def diff_hunks(
+        self, repo_dir: Path, base: str, head: str, paths: Sequence[str]
+    ) -> list[Hunk]:
+        """The hunks of `git diff -U3 -M base head -- paths`, with 3 lines of context as in a
+        GitHub PR diff. Pass both paths of a renamed file so git pairs them."""
+        result = await self._git.run(
+            repo_dir,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "-U3",
+            "-M",
+            base,
+            head,
+            "--",
+            *paths,
+        )
+        return parse_hunks(result.stdout_text)
+
+    async def tree_entries(self, repo_dir: Path, sha: str, paths: Sequence[str]) -> dict[str, str]:
+        """Map each of `paths` that exists at commit `sha` to its object id."""
+        if not paths:
+            return {}
+        listing = await self._git.output(repo_dir, "ls-tree", "-z", sha, "--", *paths)
+        entries: dict[str, str] = {}
+        for token in listing.split("\0"):
+            if not token:
+                continue
+            meta, _, entry_path = token.partition("\t")
+            entries[entry_path] = meta.split()[2]
+        return entries
 
     async def read_blob(self, repo_dir: Path, sha: str, path: str) -> BlobContent | None:
         """Read `path` at commit `sha`. Returns None if the path is not a file at that commit.

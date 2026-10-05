@@ -171,17 +171,29 @@ def pr_view_json(
     ).encode()
 
 
+VIEWER_LOGIN = "reviewer"
+
+
 class _Rule(NamedTuple):
     tokens: frozenset[str]
     result: CommandResult
 
 
+def _default_rules() -> list[_Rule]:
+    viewer = json.dumps({"login": VIEWER_LOGIN}).encode()
+    return [_Rule(frozenset({"api", "user"}), CommandResult((), 0, viewer, b""))]
+
+
 @dataclass
 class FakeGh:
-    """A CommandRunner for `gh`. The newest rule whose tokens all appear in the args answers."""
+    """A CommandRunner for `gh`. The newest rule whose tokens all appear in the args answers.
 
-    rules: list[_Rule] = field(default_factory=list)
+    `gh api user` answers VIEWER_LOGIN unless a test adds its own rule.
+    """
+
+    rules: list[_Rule] = field(default_factory=_default_rules)
     calls: list[tuple[str, ...]] = field(default_factory=list)
+    stdins: list[bytes | None] = field(default_factory=list)
 
     def on(self, *tokens: str, stdout: bytes = b"[]", stderr: bytes = b"", code: int = 0) -> None:
         result = CommandResult(args=(), returncode=code, stdout=stdout, stderr=stderr)
@@ -194,9 +206,11 @@ class FakeGh:
         timeout: float,
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
+        stdin: bytes | None = None,
     ) -> CommandResult:
         call = tuple(args)
         self.calls.append(call)
+        self.stdins.append(stdin)
         for tokens, result in self.rules:
             if tokens <= set(call):
                 return CommandResult(
@@ -209,6 +223,13 @@ class FakeGh:
 
     def calls_with(self, *tokens: str) -> list[tuple[str, ...]]:
         return [call for call in self.calls if set(tokens) <= set(call)]
+
+    def stdins_with(self, *tokens: str) -> list[bytes | None]:
+        return [
+            stdin
+            for call, stdin in zip(self.calls, self.stdins, strict=True)
+            if set(tokens) <= set(call)
+        ]
 
 
 def write_config(home: Path, body: str) -> None:

@@ -21,7 +21,7 @@ async def test_health(client: httpx.AsyncClient) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "schema_version": 3,
+        "schema_version": 4,
         "worktrees": {"count": 0, "released": 0},
     }
 
@@ -165,7 +165,7 @@ async def test_delete_thread(client: httpx.AsyncClient, app_service: ReviewServi
     assert foreign.status_code == 403
     assert (deleted.status_code, deleted.json()) == (200, {"deleted": True})
     assert conflict.status_code == 409
-    assert "only a draft can be deleted" in conflict.json()["error"]
+    assert "only a draft or stale thread can be deleted" in conflict.json()["error"]
     assert missing.status_code == 404
     assert [c["id"] for c in (await client.get(f"{base}/comments")).json()] == [submitted_id]
 
