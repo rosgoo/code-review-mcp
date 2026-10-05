@@ -167,7 +167,7 @@ A PR review can ask a built-in Claude agent questions. The daemon runs one Claud
 ```toml
 [agent]
 enabled = true
-model = "opus"
+model = "claude-opus-5-5"
 idle_minutes = 30
 max_live_clients = 3
 max_turns = 30                 # passed to the CLI as --max-turns

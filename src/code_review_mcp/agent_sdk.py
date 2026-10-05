@@ -11,6 +11,7 @@ from claude_agent_sdk import (
     HookMatcher,
     ResultMessage,
     StreamEvent,
+    SystemMessage,
     TextBlock,
     create_sdk_mcp_server,
     tool,
@@ -110,6 +111,7 @@ class SdkAgentSession:
 
     def __init__(self, client: ClaudeSDKClient) -> None:
         self._client = client
+        self._model_logged = False
 
     async def send(self, prompt: str) -> None:
         try:
@@ -128,6 +130,17 @@ class SdkAgentSession:
                         "text_delta"
                     ):
                         yield TextDelta(text=str(delta.get("text", "")))
+                elif (
+                    isinstance(message, SystemMessage)
+                    and message.subtype == "init"
+                    and not self._model_logged
+                ):
+                    self._model_logged = True
+                    logger.info(
+                        "agent session %s runs model %s",
+                        message.data.get("session_id"),
+                        message.data.get("model"),
+                    )
                 elif isinstance(message, AssistantMessage):
                     text_blocks += [b.text for b in message.content if isinstance(b, TextBlock)]
                 elif isinstance(message, ResultMessage):

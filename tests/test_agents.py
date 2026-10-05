@@ -18,7 +18,7 @@ from code_review_mcp.github import GitHubClient
 from code_review_mcp.github_reviews import GitHubReviewWriter
 from code_review_mcp.hub import ReviewHub
 from code_review_mcp.pr_service import PrService
-from code_review_mcp.repo_config import load_repo_config
+from code_review_mcp.repo_config import AgentConfig, ConfigError, load_repo_config
 from code_review_mcp.review_threads import AnchorRequest, ThreadService
 from code_review_mcp.store import MessageRow, ReviewRow, Store, ThreadRow, timestamp
 from code_review_mcp.web import create_app
@@ -906,3 +906,51 @@ def test_turn_end_is_frozen() -> None:
     end = TurnEnd(None, None, None, False, "success", False)
     with pytest.raises(AttributeError):
         end.is_error = True  # type: ignore[misc]
+
+
+def test_agent_config(tmp_path: Path) -> None:
+    assert load_repo_config(tmp_path).agent == AgentConfig(
+        enabled=True,
+        model="claude-opus-5-5",
+        idle_minutes=30.0,
+        max_live_clients=3,
+        max_turns=30,
+        max_client_budget_usd=10.0,
+        question_timeout_minutes=5.0,
+        warmup="inbox",
+    )
+    write_config(
+        tmp_path,
+        '[agent]\nenabled = false\nmodel = "haiku"\nidle_minutes = 2\nmax_live_clients = 1\n'
+        "max_turns = 4\nmax_client_budget_usd = 0.5\nquestion_timeout_minutes = 1\n"
+        'warmup = "never"\n',
+    )
+    assert load_repo_config(tmp_path).agent == AgentConfig(
+        enabled=False,
+        model="haiku",
+        idle_minutes=2.0,
+        max_live_clients=1,
+        max_turns=4,
+        max_client_budget_usd=0.5,
+        question_timeout_minutes=1.0,
+        warmup="never",
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "agent = 1",
+        "[agent]\nenabled = 'yes'",
+        "[agent]\nmodel = ''",
+        "[agent]\nwarmup = 'sometimes'",
+        "[agent]\nmax_live_clients = 0",
+        "[agent]\nmax_turns = 2.5",
+        "[agent]\nmax_client_budget_usd = -1",
+        "[agent]\nidle_minutes = true",
+    ],
+)
+def test_agent_config_errors(tmp_path: Path, body: str) -> None:
+    write_config(tmp_path, body)
+    with pytest.raises(ConfigError):
+        load_repo_config(tmp_path)
