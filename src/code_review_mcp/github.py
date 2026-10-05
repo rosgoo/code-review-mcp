@@ -40,6 +40,8 @@ query($q: String!, $first: Int!, $after: String) {
         viewerLatestReview { state }
         labels(first: 10) { nodes { name } }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+        stackEntry { position }
+        stack { number size }
       }
     }
   }
@@ -109,6 +111,13 @@ class ResolvedRef:
 
 
 @dataclass(frozen=True)
+class InboxStack:
+    number: int
+    size: int
+    position: int
+
+
+@dataclass(frozen=True)
 class InboxPr:
     repo: str
     number: int
@@ -128,6 +137,7 @@ class InboxPr:
     viewer_review: str | None
     labels: tuple[str, ...]
     ci_state: CheckState | None
+    stack: InboxStack | None = None
 
 
 @dataclass(frozen=True)
@@ -297,6 +307,15 @@ class _GqlCommits(_GhModel):
     nodes: list[_GqlCommitNode] = []
 
 
+class _GqlStackEntry(_GhModel):
+    position: int
+
+
+class _GqlStackRef(_GhModel):
+    number: int
+    size: int
+
+
 class _GqlPullRequest(_GhModel):
     number: int
     title: str
@@ -315,6 +334,8 @@ class _GqlPullRequest(_GhModel):
     viewer_latest_review: _GqlState | None = None
     labels: _GqlLabels | None = None
     commits: _GqlCommits | None = None
+    stack_entry: _GqlStackEntry | None = None
+    stack: _GqlStackRef | None = None
 
 
 class _GqlOtherNode(_GhModel):
@@ -414,6 +435,11 @@ _ROLLUP_STATES: dict[str, CheckState] = {
 }
 
 
+def rollup_ci_state(state: str | None) -> CheckState | None:
+    """Map a commit's statusCheckRollup state to success, failure, pending, or None."""
+    return _ROLLUP_STATES.get(state.upper()) if state else None
+
+
 def _inbox_pr(pr: _GqlPullRequest) -> InboxPr:
     commits = pr.commits.nodes if pr.commits else []
     rollup = commits[-1].commit.status_check_rollup if commits else None
@@ -435,7 +461,12 @@ def _inbox_pr(pr: _GqlPullRequest) -> InboxPr:
         review_decision=pr.review_decision or None,
         viewer_review=pr.viewer_latest_review.state if pr.viewer_latest_review else None,
         labels=tuple(label.name for label in pr.labels.nodes) if pr.labels else (),
-        ci_state=_ROLLUP_STATES.get(rollup.state.upper()) if rollup else None,
+        ci_state=rollup_ci_state(rollup.state) if rollup else None,
+        stack=(
+            InboxStack(number=pr.stack.number, size=pr.stack.size, position=pr.stack_entry.position)
+            if pr.stack is not None and pr.stack_entry is not None
+            else None
+        ),
     )
 
 

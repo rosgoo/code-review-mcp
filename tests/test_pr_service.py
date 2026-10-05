@@ -266,6 +266,7 @@ async def test_inbox_links_opened_prs(prs: PrService, fake_gh: FakeGh) -> None:
         "viewer_review",
         "labels",
         "ci_state",
+        "stack",
         "review_id",
     }
 

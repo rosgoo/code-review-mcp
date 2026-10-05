@@ -32,6 +32,7 @@ from code_review_mcp.pr_web import build_pr_router
 from code_review_mcp.repo_config import load_repo_config
 from code_review_mcp.review_threads import ThreadService
 from code_review_mcp.service import ReviewService
+from code_review_mcp.stacks import StackFinder, StackService
 from code_review_mcp.store import Store
 from code_review_mcp.tools import build_mcp, transport_security
 from code_review_mcp.worktrees import WorktreeManager, gh_credential_helper
@@ -180,6 +181,7 @@ def create_app(
     threads = ThreadService(
         store, hub, prs, github_client, GitHubReviewWriter(github_client.runner)
     )
+    stacks = StackService(store, StackFinder(github_client))
     security = transport_security(settings)
     mcp = build_mcp(service, prs, security)
     mcp_app = mcp.streamable_http_app()
@@ -208,6 +210,7 @@ def create_app(
     app.state.service = service
     app.state.prs = prs
     app.state.threads = threads
+    app.state.stacks = stacks
     app.state.sweeper = sweeper
     app.state.mcp = mcp
 
@@ -240,7 +243,7 @@ def create_app(
         return JSONResponse({"error": str(exc)}, status_code=400)
 
     app.include_router(build_api_router(service, hub, store))
-    app.include_router(build_pr_router(prs, threads))
+    app.include_router(build_pr_router(prs, threads, stacks))
     # Mount("/mcp") would answer POST /mcp with a 307 to /mcp/, so add the route itself.
     app.router.routes.extend(mcp_app.routes)
     app.mount("/static", RevalidatedStaticFiles(directory=STATIC_DIR), name="static")

@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from code_review_mcp.github import InboxName
 from code_review_mcp.pr_service import PrService
 from code_review_mcp.review_threads import AnchorRequest, ThreadService
+from code_review_mcp.stacks import StackService
 from code_review_mcp.store import Side, SubmissionEvent
 
 
@@ -40,8 +41,12 @@ class SubmitReviewRequest(BaseModel):
     body: str = ""
 
 
-def build_pr_router(prs: PrService, threads: ThreadService) -> APIRouter:
+def build_pr_router(prs: PrService, threads: ThreadService, stacks: StackService) -> APIRouter:
     router = APIRouter(prefix="/api")
+
+    @router.get("/reviews/{review_id}/stack")
+    async def review_stack(review_id: str) -> dict[str, object] | None:
+        return await stacks.review_stack(review_id)
 
     @router.get("/reviews/{review_id}/threads")
     async def list_threads(review_id: str) -> list[dict[str, object]]:

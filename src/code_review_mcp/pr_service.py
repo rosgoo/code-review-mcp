@@ -249,6 +249,15 @@ class PrService:
                     "viewer_review": pr.viewer_review,
                     "labels": list(pr.labels),
                     "ci_state": pr.ci_state,
+                    "stack": (
+                        {
+                            "number": pr.stack.number,
+                            "size": pr.stack.size,
+                            "position": pr.stack.position,
+                        }
+                        if pr.stack is not None
+                        else None
+                    ),
                     "review_id": review_ids.get(PrKey(pr.repo, pr.number)),
                 }
                 for pr in inbox_list.items

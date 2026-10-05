@@ -120,10 +120,11 @@ idle_days = 7           # default
 
 | Route | Purpose |
 |---|---|
-| `GET /api/inbox/{direct\|mine\|team}?refresh=false` | One list: `{name, total, fetched_at, refreshing, items}`; each item has its `review_id` if opened. `team` leaves out PRs in `direct` |
+| `GET /api/inbox/{direct\|mine\|team}?refresh=false` | One list: `{name, total, fetched_at, refreshing, items}`; each item has its `review_id` if opened, and `stack: {number, size, position}` when it is in a GitHub stack. `team` leaves out PRs in `direct` |
 | `GET /api/inbox?refresh=false` | All three lists: `{fetched_at, direct, mine, team}` |
 | `POST /api/prs/open {ref}` | Open or reopen a PR → `{review_id, url, note?}` |
 | `GET /api/reviews/{id}/pr` | PR metadata and changed files (status, old path, line counts, viewed) |
+| `GET /api/reviews/{id}/stack` | The PR's stack, or `null`: GitHub's native stack, or else the chain of open PRs whose base is the head of the PR below (`source: "branches"`). `extensions` are open PRs based on a stack PR's head but not in the stack. Cached 60 s |
 | `GET /api/reviews/{id}/file?path=` | Old content (merge base) and new content (head) of one changed file |
 | `POST /api/reviews/{id}/refresh` | Re-read the PR; on a new head, check it out and send SSE `head_moved` |
 | `PUT` / `DELETE /api/reviews/{id}/viewed {path}` | Mark or unmark a file viewed at the current head |
