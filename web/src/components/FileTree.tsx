@@ -1,10 +1,20 @@
 import { useMemo, useState } from "react";
 import type { ChangeCounts } from "../lib/patch";
-import { buildFileTree, filterPaths, type TreeDir, type TreeNode } from "../lib/tree";
+import { statusLetter } from "../lib/pr";
+import { buildFileTree, filterPaths, type TreeDir, type TreeFile, type TreeNode } from "../lib/tree";
+import type { FileStatus } from "../lib/types";
+
+export interface FileDetail {
+  status: FileStatus;
+  oldPath: string | null;
+  viewed: boolean;
+}
 
 interface TreeProps {
   counts: ReadonlyMap<string, ChangeCounts>;
+  details?: ReadonlyMap<string, FileDetail>;
   onSelect(path: string): void;
+  onToggleViewed?(path: string, viewed: boolean): void;
 }
 
 const indent = (depth: number) => ({ paddingLeft: `${8 + depth * 14}px` });
@@ -38,6 +48,50 @@ function TreeDirItem({ node, depth, ...props }: TreeProps & { node: TreeDir; dep
   );
 }
 
+function TreeFileItem({
+  node,
+  depth,
+  counts,
+  details,
+  onSelect,
+  onToggleViewed,
+}: TreeProps & { node: TreeFile; depth: number }) {
+  const detail = details?.get(node.path);
+  const title = detail?.oldPath ? `${detail.oldPath} → ${node.path}` : node.path;
+  return (
+    <li className={detail?.viewed ? "tree-row viewed" : "tree-row"}>
+      <button
+        type="button"
+        className="tree-file"
+        style={indent(depth)}
+        title={title}
+        onClick={() => onSelect(node.path)}
+      >
+        {detail && (
+          <span className={`status-letter status-${detail.status}`} title={detail.status}>
+            {statusLetter(detail.status)}
+          </span>
+        )}
+        <span className="tree-file-name">
+          {node.name}
+          {detail?.oldPath && <span className="tree-old-path">← {detail.oldPath}</span>}
+        </span>
+        <Counts counts={counts.get(node.path)} />
+      </button>
+      {detail && onToggleViewed && (
+        <input
+          type="checkbox"
+          className="tree-viewed"
+          checked={detail.viewed}
+          title={detail.viewed ? "Viewed" : "Mark as viewed"}
+          aria-label={`Viewed ${node.path}`}
+          onChange={(event) => onToggleViewed(node.path, event.target.checked)}
+        />
+      )}
+    </li>
+  );
+}
+
 function TreeList({ nodes, depth, ...props }: TreeProps & { nodes: TreeNode[]; depth: number }) {
   return (
     <ul>
@@ -45,18 +99,7 @@ function TreeList({ nodes, depth, ...props }: TreeProps & { nodes: TreeNode[]; d
         node.kind === "dir" ? (
           <TreeDirItem key={`dir:${node.name}`} node={node} depth={depth} {...props} />
         ) : (
-          <li key={node.path}>
-            <button
-              type="button"
-              className="tree-file"
-              style={indent(depth)}
-              title={node.path}
-              onClick={() => props.onSelect(node.path)}
-            >
-              <span className="tree-file-name">{node.name}</span>
-              <Counts counts={props.counts.get(node.path)} />
-            </button>
-          </li>
+          <TreeFileItem key={node.path} node={node} depth={depth} {...props} />
         ),
       )}
     </ul>

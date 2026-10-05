@@ -297,8 +297,41 @@ async def test_gh_errors() -> None:
         await client.pull_request("o/r", 6)
 
 
+def _inbox_item(number: int, title: str, updated_at: str) -> dict[str, object]:
+    return {
+        "author": {"login": "zach", "is_bot": False},
+        "isDraft": False,
+        "number": number,
+        "repository": {"name": "r", "nameWithOwner": "o/r"},
+        "title": title,
+        "updatedAt": updated_at,
+        "url": f"https://github.com/o/r/pull/{number}",
+    }
+
+
+async def test_review_requests_split_direct_and_team() -> None:
+    fake = FakeGh()
+    mine = _inbox_item(5, "requested from me", "2026-10-05T10:00:00Z")
+    team_old = _inbox_item(6, "team, older", "2026-10-04T10:00:00Z")
+    team_new = _inbox_item(7, "team, newer", "2026-10-05T12:00:00Z")
+    fake.on("user-review-requested:@me", stdout=json.dumps([mine]).encode())
+    fake.on("--review-requested=@me", stdout=json.dumps([team_old, mine, team_new]).encode())
+    client = GitHubClient(fake)
+
+    snapshot = await client.review_requests()
+
+    assert [r.number for r in snapshot.direct] == [5]
+    assert [r.number for r in snapshot.team] == [7, 6]
+    [direct_call] = fake.calls_with("user-review-requested:@me")
+    [team_call] = fake.calls_with("--review-requested=@me")
+    for call in (direct_call, team_call):
+        assert call[:2] == ("gh", "search")
+        assert {"--state=open", "--sort=updated", "--order=desc", "--limit=100"} <= set(call)
+
+
 async def test_review_requests_are_cached() -> None:
     fake = FakeGh()
+    fake.on("user-review-requested:@me", stdout=b"[]")
     items = [
         {
             "author": {"login": "zach", "is_bot": False},
@@ -330,13 +363,13 @@ async def test_review_requests_are_cached() -> None:
     now[0] += 61
     expired = await client.review_requests()
 
-    assert [r.number for r in first.items] == [3, 2]
-    assert first.items[0].is_draft and first.items[0].author == "nat"
+    assert [r.number for r in first.team] == [3, 2]
+    assert first.direct == ()
+    assert first.team[0].is_draft and first.team[0].author == "nat"
     assert cached is first
     assert forced is not first
     assert expired is not forced
-    assert len(fake.calls) == 3
-    assert "--state=open" in fake.calls[0]
+    assert len(fake.calls) == 6
 
 
 def test_repo_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

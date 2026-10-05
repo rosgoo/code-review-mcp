@@ -15,6 +15,15 @@ export default defineConfig(({ command }) => ({
   build: {
     outDir: fileURLToPath(new URL("../src/code_review_mcp/static", import.meta.url)),
     emptyOutDir: true,
+    // Stable names keep a UI change from renaming every chunk that imports the entry
+    // chunk. The daemon serves /static with no-cache, so browsers revalidate instead.
+    rolldownOptions: {
+      output: {
+        entryFileNames: "assets/[name].js",
+        chunkFileNames: "assets/[name].js",
+        assetFileNames: "assets/[name][extname]",
+      },
+    },
   },
   server: {
     proxy: { "/api": proxyToDaemon, "/mcp": proxyToDaemon },

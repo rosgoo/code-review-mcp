@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator, Collection
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,6 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.datastructures import Headers
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from code_review_mcp.config import Settings
@@ -27,6 +29,24 @@ STATIC_DIR = Path(__file__).parent / "static"
 INDEX_HTML = STATIC_DIR / "index.html"
 SSE_KEEPALIVE_SECONDS = 30.0
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+class RevalidatedStaticFiles(StaticFiles):
+    """Static files the browser must revalidate (ETag / Last-Modified) before each use.
+
+    The built UI uses file names without content hashes, so a cached copy can be stale.
+    """
+
+    def file_response(
+        self,
+        full_path: os.PathLike[str] | str,
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 class ApiOriginGuard:
@@ -184,7 +204,7 @@ def create_app(
     app.include_router(build_pr_router(prs))
     # Mount("/mcp") would answer POST /mcp with a 307 to /mcp/, so add the route itself.
     app.router.routes.extend(mcp_app.routes)
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    app.mount("/static", RevalidatedStaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/", include_in_schema=False)
     @app.get("/r/{review_id}", include_in_schema=False)

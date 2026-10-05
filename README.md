@@ -100,19 +100,21 @@ Each PR review gets one detached worktree at `<data dir>/worktrees/<owner>-<name
 
 | Tool | What it does |
 |---|---|
-| `list_review_requests(refresh=False)` | Open PRs that request your review (cached 60 s) |
+| `list_review_requests(refresh=False)` | Open PRs that request your review, as `direct` (you by name) and `team` (only a team you are in); up to 100 each, newest first, cached 60 s |
 | `open_pr(ref)` → `{review_id, url}` | `ref`: PR URL, `owner/name#123`, `#123`, commit SHA, or branch. Same PR, same `review_id`. |
 | `get_review(review_id)` | Metadata, changed files, worktree path, thread summary |
 
 | Route | Purpose |
 |---|---|
-| `GET /api/inbox?refresh=false` | Review requests, each with its `review_id` if opened |
+| `GET /api/inbox?refresh=false` | Review requests as `{fetched_at, direct, team}`, each item with its `review_id` if opened |
 | `POST /api/prs/open {ref}` | Open or reopen a PR → `{review_id, url, note?}` |
 | `GET /api/reviews/{id}/pr` | PR metadata and changed files (status, old path, line counts, viewed) |
 | `GET /api/reviews/{id}/file?path=` | Old content (merge base) and new content (head) of one changed file |
 | `POST /api/reviews/{id}/refresh` | Re-read the PR; on a new head, check it out and send SSE `head_moved` |
 | `PUT` / `DELETE /api/reviews/{id}/viewed {path}` | Mark or unmark a file viewed at the current head |
 | `POST /api/reviews/{id}/close` | Remove the worktree and refs; the review keeps its id |
+
+In the browser, `/` has an Open box (any ref form above), your direct review requests, your team requests (collapsed, with a filter), and recent reviews. A PR review page shows the PR's refs, CI checks, and review decision; a file tree with a Viewed checkbox per file (a viewed file collapses); and one diff per file, loaded when you scroll near it. Refresh re-reads the PR. When the head moves, a banner offers a reload. Close review removes the worktree. PR pages have no commenting yet.
 
 Code: `github.py` (`gh` calls, ref parsing), `worktrees.py` (git), `pr_service.py`, `pr_web.py` (routes), `repo_config.py` (`config.toml`).
 

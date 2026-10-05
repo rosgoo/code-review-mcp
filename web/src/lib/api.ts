@@ -1,4 +1,14 @@
-import type { Comment, NewComment, ReviewSummary, ReviewView } from "./types";
+import type {
+  Comment,
+  Inbox,
+  NewComment,
+  OpenedPr,
+  PrFileContent,
+  PrView,
+  RefreshResult,
+  ReviewSummary,
+  ReviewView,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -22,9 +32,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-function post<T>(path: string, payload?: unknown): Promise<T> {
+function send<T>(method: string, path: string, payload?: unknown): Promise<T> {
   return request<T>(path, {
-    method: "POST",
+    method,
     headers:
       payload === undefined
         ? undefined
@@ -32,6 +42,8 @@ function post<T>(path: string, payload?: unknown): Promise<T> {
     body: payload === undefined ? undefined : JSON.stringify(payload),
   });
 }
+
+const post = <T>(path: string, payload?: unknown) => send<T>("POST", path, payload);
 
 const reviewPath = (id: string) => `/api/reviews/${encodeURIComponent(id)}`;
 const threadPath = (id: string) => `/api/threads/${encodeURIComponent(id)}`;
@@ -52,6 +64,17 @@ export const api = {
     }),
   deleteThread: (threadId: string) =>
     request<{ deleted: boolean }>(threadPath(threadId), { method: "DELETE" }),
+  inbox: (refresh = false) => request<Inbox>(refresh ? "/api/inbox?refresh=true" : "/api/inbox"),
+  openPr: (ref: string) => post<OpenedPr>("/api/prs/open", { ref }),
+  prView: (reviewId: string) => request<PrView>(`${reviewPath(reviewId)}/pr`),
+  prFile: (reviewId: string, path: string) =>
+    request<PrFileContent>(`${reviewPath(reviewId)}/file?path=${encodeURIComponent(path)}`),
+  refreshPr: (reviewId: string) => post<RefreshResult>(`${reviewPath(reviewId)}/refresh`),
+  setViewed: (reviewId: string, path: string, viewed: boolean) =>
+    send<{ path: string; viewed: boolean }>(viewed ? "PUT" : "DELETE", `${reviewPath(reviewId)}/viewed`, {
+      path,
+    }),
+  closePr: (reviewId: string) => post<{ ok: boolean }>(`${reviewPath(reviewId)}/close`),
 };
 
 export const eventsUrl = (reviewId: string) =>

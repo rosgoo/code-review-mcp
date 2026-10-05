@@ -208,7 +208,7 @@ describe("anchors", () => {
 });
 
 describe("fileEntries", () => {
-  const base = { review_id: "r", title: "t" };
+  const base = { review_id: "r", kind: "local" as const, title: "t" };
   const appFile = { path: "src/app.py", content: "new", language: "python" };
 
   it("renders a patch-only review from the patch", () => {

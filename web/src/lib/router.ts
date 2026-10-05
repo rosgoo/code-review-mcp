@@ -22,10 +22,22 @@ export function resolveRoute(pathname: string, search: string): Route {
 
 const NAVIGATE_EVENT = "code-review:navigate";
 
-export function navigate(to: string, { replace = false } = {}) {
-  if (replace) history.replaceState(null, "", to);
-  else history.pushState(null, "", to);
+export interface NavigationState {
+  note?: string;
+}
+
+export function navigate(
+  to: string,
+  { replace = false, state = null }: { replace?: boolean; state?: NavigationState | null } = {},
+) {
+  if (replace) history.replaceState(state, "", to);
+  else history.pushState(state, "", to);
   window.dispatchEvent(new Event(NAVIGATE_EVENT));
+}
+
+export function navigationState(): NavigationState {
+  const state: unknown = history.state;
+  return state !== null && typeof state === "object" ? (state as NavigationState) : {};
 }
 
 function subscribe(onChange: () => void) {

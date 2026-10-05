@@ -21,11 +21,10 @@ import {
 } from "../lib/anchors";
 import { diffAnnotations, fileAnnotations, type AnnotationData } from "../lib/annotations";
 import type { FileEntry } from "../lib/entries";
-import type { Comment, ViewFile } from "../lib/types";
+import type { Comment, DiffStyle, ViewFile } from "../lib/types";
 import { Markdown } from "./Markdown";
 import { AnnotationSlot } from "./Thread";
 
-export type DiffStyle = "unified" | "split";
 
 export const fileDomId = (path: string) => `file-${path}`;
 

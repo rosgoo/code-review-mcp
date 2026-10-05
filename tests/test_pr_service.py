@@ -243,12 +243,13 @@ async def test_inbox_links_opened_prs(prs: PrService, fake_gh: FakeGh) -> None:
     }
     other = {**item, "number": 2, "url": f"https://github.com/{REPO}/pull/2"}
     fake_gh.on("--review-requested=@me", stdout=json.dumps([item, other]).encode())
+    fake_gh.on("user-review-requested:@me", stdout=json.dumps([item]).encode())
     review_id = (await prs.open_pr(PR_URL)).review.id
 
     inbox = _plain(await prs.inbox())
 
-    links = {i["number"]: i["review_id"] for i in inbox["items"]}
-    assert links == {PR_NUMBER: review_id, 2: None}
+    assert [(i["number"], i["review_id"]) for i in inbox["direct"]] == [(PR_NUMBER, review_id)]
+    assert [(i["number"], i["review_id"]) for i in inbox["team"]] == [(2, None)]
 
 
 async def test_local_and_unknown_reviews_are_rejected(

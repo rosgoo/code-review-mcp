@@ -282,6 +282,7 @@ def test_open_diff_without_working_dir_uses_diff_mode(service: ReviewService) ->
     assert review.working_dir is None
     assert service.view(review.id) == {
         "review_id": review.id,
+        "kind": "local",
         "mode": "diff",
         "title": "Plain",
         "diff": SAMPLE_DIFF,

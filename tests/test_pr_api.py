@@ -55,7 +55,9 @@ def fake_gh(pr_repo: PrRepo) -> FakeGh:
         code=1,
         stderr=b"GraphQL: Could not resolve to a PullRequest with the number of 404.",
     )
-    fake.on("--review-requested=@me", stdout=json.dumps([INBOX_ITEM]).encode())
+    other = {**INBOX_ITEM, "number": 2, "url": f"https://github.com/{REPO}/pull/2"}
+    fake.on("--review-requested=@me", stdout=json.dumps([INBOX_ITEM, other]).encode())
+    fake.on("user-review-requested:@me", stdout=json.dumps([INBOX_ITEM]).encode())
     fake.on(
         "search",
         "prs",
@@ -131,8 +133,10 @@ async def test_inbox_view_file_viewed_refresh_close(pr_client: httpx.AsyncClient
     closed = await pr_client.post(f"{base}/close")
     after_close = (await pr_client.get(f"{base}/pr")).json()
 
-    assert inbox["items"][0]["review_id"] == review_id
-    assert inbox["items"][0]["is_draft"] is True
+    assert [(i["number"], i["review_id"], i["is_draft"]) for i in inbox["direct"]] == [
+        (PR_NUMBER, review_id, True)
+    ]
+    assert [(i["number"], i["review_id"]) for i in inbox["team"]] == [(2, None)]
     assert sorted(f["path"] for f in view["files"]) == [
         "app.py",
         "data.bin",
@@ -226,7 +230,8 @@ async def test_pr_tools(pr_app: FastAPI, pr_repo: PrRepo) -> None:
         bad = _tool_result(await session.call_tool("open_pr", {"ref": "#404"}))
         missing = _tool_result(await session.call_tool("get_review", {"review_id": "nope"}))
 
-    assert inbox["items"][0]["number"] == PR_NUMBER
+    assert [i["number"] for i in inbox["direct"]] == [PR_NUMBER]
+    assert [i["number"] for i in inbox["team"]] == [2]
     assert opened["url"] == f"{BASE_URL}/r/{opened['review_id']}"
     assert again["review_id"] == opened["review_id"]
     assert review["head_sha"] == pr_repo.head_sha

@@ -117,6 +117,7 @@ class ReviewService:
         review = self.require_review(review_id)
         result: dict[str, object] = {
             "review_id": review.id,
+            "kind": review.kind,
             "mode": review.mode or "empty",
             "title": review.title,
         }

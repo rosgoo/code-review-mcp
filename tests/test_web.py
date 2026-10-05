@@ -45,6 +45,7 @@ async def test_view_and_not_found(client: httpx.AsyncClient, app_service: Review
 
     assert view.json() == {
         "review_id": review.id,
+        "kind": "local",
         "mode": "diff",
         "title": "View",
         "diff": SAMPLE_DIFF,
@@ -126,6 +127,21 @@ async def test_ui_is_served(client: httpx.AsyncClient, app_service: ReviewServic
     assert review_page.text == index.text
     assert script.status_code == 200
     assert "/api/reviews" in script.text
+
+
+async def test_static_assets_must_be_revalidated(client: httpx.AsyncClient) -> None:
+    index = await client.get("/")
+    match = re.search(r'src="(/static/assets/[^"]+\.js)"', index.text)
+    assert match is not None
+
+    first = await client.get(match.group(1))
+    again = await client.get(match.group(1), headers={"If-None-Match": first.headers["etag"]})
+
+    assert index.headers["cache-control"] == "no-cache"
+    assert first.status_code == 200
+    assert first.headers["cache-control"] == "no-cache"
+    assert again.status_code == 304
+    assert again.headers["cache-control"] == "no-cache"
 
 
 async def test_delete_thread(client: httpx.AsyncClient, app_service: ReviewService) -> None:

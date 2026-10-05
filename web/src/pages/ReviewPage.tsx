@@ -1,70 +1,29 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { CommentsPanel } from "../components/CommentsPanel";
-import { DiffEntryView, fileDomId, PlainFileView, type DiffStyle } from "../components/FileViews";
+import { DiffStyleToggle } from "../components/DiffStyleToggle";
+import { DiffEntryView, fileDomId, PlainFileView } from "../components/FileViews";
 import { FileTree } from "../components/FileTree";
 import { Link } from "../components/Link";
 import { ReviewBar } from "../components/ReviewBar";
 import { ReviewContext, type ReviewActions } from "../components/ReviewContext";
 import { errorMessage, threadDomId, ThreadCard } from "../components/Thread";
 import { sameAnchor, toNewComment, type CommentAnchor } from "../lib/anchors";
-import { api, eventsUrl } from "../lib/api";
+import { api } from "../lib/api";
 import { applyCommentEvent, OVERALL_PATH } from "../lib/comments";
 import { fileEntries } from "../lib/entries";
 import type { ChangeCounts } from "../lib/patch";
-import { readSetting, writeSetting } from "../lib/storage";
-import type { Comment, ReviewEvent, ReviewView } from "../lib/types";
+import { jumpTo } from "../lib/dom";
+import { useDiffStyle, useReviewEvents } from "../lib/hooks";
+import type { Comment, ReviewView } from "../lib/types";
 
-const DIFF_STYLE_KEY = "code-review-mcp:diff-style";
-
-function useDiffStyle(): [DiffStyle, (style: DiffStyle) => void] {
-  const [style, setStyle] = useState<DiffStyle>(() =>
-    readSetting(DIFF_STYLE_KEY) === "split" ? "split" : "unified",
-  );
-  const update = useCallback((next: DiffStyle) => {
-    setStyle(next);
-    writeSetting(DIFF_STYLE_KEY, next);
-  }, []);
-  return [style, update];
-}
-
-/** Subscribe to the review's SSE stream. A reconnect is reported as a view_updated. */
-function useReviewEvents(reviewId: string, onEvent: (event: ReviewEvent) => void) {
-  const handler = useRef(onEvent);
-  useEffect(() => {
-    handler.current = onEvent;
-  });
-  useEffect(() => {
-    const source = new EventSource(eventsUrl(reviewId));
-    let connections = 0;
-    source.onmessage = (message: MessageEvent<string>) => {
-      let event: ReviewEvent;
-      try {
-        event = JSON.parse(message.data) as ReviewEvent;
-      } catch {
-        return;
-      }
-      if (event.type === "connected") {
-        connections += 1;
-        if (connections > 1) handler.current({ type: "view_updated" });
-        return;
-      }
-      handler.current(event);
-    };
-    return () => source.close();
-  }, [reviewId]);
-}
-
-function jumpTo(elementId: string) {
-  const element = document.getElementById(elementId);
-  if (element === null) return;
-  element.scrollIntoView({ behavior: "smooth", block: "center" });
-  element.classList.remove("pulse");
-  void element.offsetWidth;
-  element.classList.add("pulse");
-}
-
-export function ReviewPage({ reviewId }: { reviewId: string }) {
-  const [view, setView] = useState<ReviewView | null>(null);
+export function ReviewPage({
+  reviewId,
+  initialView,
+}: {
+  reviewId: string;
+  initialView: ReviewView;
+}) {
+  const [view, setView] = useState<ReviewView | null>(initialView);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [comments, setComments] = useState<Comment[]>([]);
   const [composer, setComposer] = useState<CommentAnchor | null>(null);
@@ -90,9 +49,8 @@ export function ReviewPage({ reviewId }: { reviewId: string }) {
   }, [reviewId]);
 
   useEffect(() => {
-    void loadView();
     void loadComments();
-  }, [loadView, loadComments]);
+  }, [loadComments]);
 
   useReviewEvents(reviewId, (event) => {
     if (event.type === "view_updated") {
@@ -219,21 +177,7 @@ export function ReviewPage({ reviewId }: { reviewId: string }) {
             {view?.title ?? "…"}
           </h1>
           <span className="spacer" />
-          {showsDiff && (
-            <div className="segmented" role="group" aria-label="Diff layout">
-              {(["unified", "split"] as const).map((style) => (
-                <button
-                  key={style}
-                  type="button"
-                  className={style === diffStyle ? "active" : ""}
-                  aria-pressed={style === diffStyle}
-                  onClick={() => setDiffStyle(style)}
-                >
-                  {style === "unified" ? "Unified" : "Split"}
-                </button>
-              ))}
-            </div>
-          )}
+          {showsDiff && <DiffStyleToggle value={diffStyle} onChange={setDiffStyle} />}
           <button
             type="button"
             className="button"

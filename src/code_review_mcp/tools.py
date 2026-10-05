@@ -258,10 +258,12 @@ def build_mcp(
     async def list_review_requests(refresh: bool = False) -> dict[str, object]:
         """List the open GitHub PRs that request the user's review, newest update first.
 
+        direct: PRs that request the user by name. team: PRs that request only a team the
+        user is in. Each list holds at most 100 PRs, the most recently updated.
         Results are cached for 60 s; refresh=True fetches again.
-        Returns {"fetched_at": str, "items": [{repo, number, title, author, url,
-        updated_at, is_draft, review_id}]}. review_id is null until the PR is opened here.
-        Read-only.
+        Returns {"fetched_at": str, "direct": [item], "team": [item]}, where an item is
+        {repo, number, title, author, url, updated_at, is_draft, review_id}. review_id is
+        null until the PR is opened here. Read-only.
         """
         try:
             return await prs.inbox(refresh=refresh)

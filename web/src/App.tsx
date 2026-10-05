@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { Link } from "./components/Link";
 import { navigate, useRoute } from "./lib/router";
 import { Inbox } from "./pages/Inbox";
-import { ReviewPage } from "./pages/ReviewPage";
+import { ReviewRoute } from "./pages/ReviewRoute";
 
 export function App() {
   const route = useRoute();
@@ -16,7 +16,7 @@ export function App() {
     case "inbox":
       return <Inbox />;
     case "review":
-      return <ReviewPage key={route.id} reviewId={route.id} />;
+      return <ReviewRoute key={route.id} reviewId={route.id} />;
     case "redirect":
       return null;
     case "not_found":

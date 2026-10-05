@@ -1,13 +1,13 @@
 import asyncio
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
 from code_review_mcp.config import Settings
 from code_review_mcp.errors import NotFoundError, ReviewError
-from code_review_mcp.github import GitHubClient, PullRequest, StatusCheck
+from code_review_mcp.github import GitHubClient, PullRequest, ReviewRequest, StatusCheck
 from code_review_mcp.hub import ReviewHub
 from code_review_mcp.local_files import detect_language
 from code_review_mcp.repo_config import RepoConfig, load_repo_config
@@ -132,11 +132,12 @@ class PrService:
         )
 
     async def inbox(self, *, refresh: bool = False) -> dict[str, object]:
+        """Review requests split into `direct` (the user by name) and `team` (only a team)."""
         snapshot = await self._github.review_requests(refresh=refresh)
         review_ids = self._store.pr_review_ids()
-        return {
-            "fetched_at": snapshot.fetched_at,
-            "items": [
+
+        def serialize(items: Sequence[ReviewRequest]) -> list[dict[str, object]]:
+            return [
                 {
                     "repo": item.repo,
                     "number": item.number,
@@ -147,8 +148,13 @@ class PrService:
                     "is_draft": item.is_draft,
                     "review_id": review_ids.get(PrKey(item.repo, item.number)),
                 }
-                for item in snapshot.items
-            ],
+                for item in items
+            ]
+
+        return {
+            "fetched_at": snapshot.fetched_at,
+            "direct": serialize(snapshot.direct),
+            "team": serialize(snapshot.team),
         }
 
     async def open_pr(self, ref: str) -> OpenedPr:

@@ -18,6 +18,7 @@ INBOX_LIMIT = 100
 SEARCH_LIMIT = 20
 
 INBOX_FIELDS = "number,title,repository,author,url,updatedAt,isDraft"
+DIRECT_REQUEST_QUERY = "user-review-requested:@me"
 PR_VIEW_FIELDS = (
     "number,title,body,author,url,state,isDraft,baseRefName,baseRefOid,headRefName,"
     "headRefOid,files,additions,deletions,reviewDecision,reviewRequests,statusCheckRollup"
@@ -93,7 +94,8 @@ class ReviewRequest:
 
 @dataclass(frozen=True)
 class InboxSnapshot:
-    items: tuple[ReviewRequest, ...]
+    direct: tuple[ReviewRequest, ...]
+    team: tuple[ReviewRequest, ...]
     fetched_at: str
 
 
@@ -343,10 +345,43 @@ class GitHubClient:
             raise PrNotFoundError(result.describe_failure())
         raise GitHubError(result.describe_failure())
 
-    async def review_requests(self, *, refresh: bool = False) -> InboxSnapshot:
-        """Open PRs that request the user's review, newest update first.
+    async def _search_review_requests(self, query: Sequence[str]) -> list[ReviewRequest]:
+        raw = await self._gh(
+            [
+                "search",
+                "prs",
+                *query,
+                "--state=open",
+                "--sort=updated",
+                "--order=desc",
+                f"--limit={INBOX_LIMIT}",
+                f"--json={INBOX_FIELDS}",
+            ]
+        )
+        return sorted(
+            (
+                ReviewRequest(
+                    repo=item.repository.name_with_owner,
+                    number=item.number,
+                    title=item.title,
+                    author=item.author.login if item.author else None,
+                    url=item.url,
+                    updated_at=item.updated_at,
+                    is_draft=item.is_draft,
+                )
+                for item in _validate(_SEARCH_ITEMS, raw)
+            ),
+            key=lambda r: r.updated_at,
+            reverse=True,
+        )
 
-        The result is cached for the inbox TTL; `refresh=True` bypasses the cache.
+    async def review_requests(self, *, refresh: bool = False) -> InboxSnapshot:
+        """Open PRs that request the user's review, each list newest update first.
+
+        `direct` holds PRs that request the user by name. `team` holds the other PRs that
+        request a team the user is in. Each search returns at most INBOX_LIMIT PRs, the
+        most recently updated ones. The result is cached for the inbox TTL;
+        `refresh=True` bypasses the cache.
         """
         async with self._inbox_lock:
             if (
@@ -355,34 +390,15 @@ class GitHubClient:
                 and self._clock() - self._inbox_loaded_at < self._inbox_ttl
             ):
                 return self._inbox
-            raw = await self._gh(
-                [
-                    "search",
-                    "prs",
-                    "--review-requested=@me",
-                    "--state=open",
-                    f"--limit={INBOX_LIMIT}",
-                    f"--json={INBOX_FIELDS}",
-                ]
+            direct, requested = await asyncio.gather(
+                self._search_review_requests([DIRECT_REQUEST_QUERY]),
+                self._search_review_requests(["--review-requested=@me"]),
             )
-            items = sorted(
-                (
-                    ReviewRequest(
-                        repo=item.repository.name_with_owner,
-                        number=item.number,
-                        title=item.title,
-                        author=item.author.login if item.author else None,
-                        url=item.url,
-                        updated_at=item.updated_at,
-                        is_draft=item.is_draft,
-                    )
-                    for item in _validate(_SEARCH_ITEMS, raw)
-                ),
-                key=lambda r: r.updated_at,
-                reverse=True,
-            )
+            direct_keys = {(r.repo, r.number) for r in direct}
             self._inbox = InboxSnapshot(
-                items=tuple(items), fetched_at=datetime.now(UTC).isoformat()
+                direct=tuple(direct),
+                team=tuple(r for r in requested if (r.repo, r.number) not in direct_keys),
+                fetched_at=datetime.now(UTC).isoformat(),
             )
             self._inbox_loaded_at = self._clock()
             return self._inbox
