@@ -7,8 +7,14 @@ class NotFoundError(ReviewError):
 
 
 class InvalidPathError(ReviewError):
-    pass
+    """A path the daemon cannot use."""
 
 
 class ConflictError(ReviewError):
     pass
+
+
+class ThrowawayError(ReviewError):
+    """Only here for a live review test."""
+
+    code = 1

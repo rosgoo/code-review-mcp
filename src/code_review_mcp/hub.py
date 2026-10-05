@@ -4,10 +4,8 @@ from collections.abc import Mapping
 
 
 class ReviewHub:
-    """In-memory, per-review wake-ups for submit waits and SSE fan-out.
+    """Per-review wake-ups and SSE fan-out, held in memory.
 
-    A submit sets the review's event until a waiter consumes it, so a submit that lands
-    between two waits still wakes the next one. State is lost when the process exits.
     """
 
     def __init__(self) -> None:
