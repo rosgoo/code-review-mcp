@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.115.0,<1",
     "uvicorn>=0.32.0,<1",
     "pydantic>=2.10.0,<3",
+    "claude-agent-sdk==0.2.163",
 ]
 
 [project.scripts]

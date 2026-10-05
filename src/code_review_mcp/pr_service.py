@@ -57,6 +57,7 @@ class SyncResult:
     head_moved: bool
     old_head_sha: str | None
     new_head_sha: str
+    created: bool = False
 
 
 @dataclass(frozen=True)
@@ -139,7 +140,22 @@ class PrService:
         self._locks: dict[PrKey, asyncio.Lock] = {}
         self._diff_cache: dict[_DiffKey, list[ChangedFile]] = {}
         self._hunk_cache: dict[_HunkKey, list[Hunk]] = {}
+        self._opened_listeners: list[Callable[[ReviewRow, bool], None]] = []
+        self._removed_listeners: list[Callable[[str], None]] = []
         self._clock = clock
+
+    def on_pr_opened(self, listener: Callable[[ReviewRow, bool], None]) -> None:
+        """Call `listener(review, created)` after each open_pr; `created` is True the first
+        time the PR is opened here."""
+        self._opened_listeners.append(listener)
+
+    def on_worktree_removed(self, listener: Callable[[str], None]) -> None:
+        """Call `listener(review_id)` after a review's worktree is closed or released."""
+        self._removed_listeners.append(listener)
+
+    def _worktree_removed(self, review_id: str) -> None:
+        for listener in self._removed_listeners:
+            listener(review_id)
 
     def lock_for(self, repo: str, number: int) -> asyncio.Lock:
         return self._locks.setdefault(PrKey(repo, number), asyncio.Lock())
@@ -304,6 +320,8 @@ class PrService:
         )
         pr = await self._github.pull_request(resolved.repo, resolved.number)
         result = await self._sync(pr, config)
+        for listener in self._opened_listeners:
+            listener(result.review, result.created)
         return OpenedPr(
             review=result.review,
             url=self._settings.review_url(result.review.id),
@@ -378,6 +396,7 @@ class PrService:
             head_moved=moved,
             old_head_sha=old_head,
             new_head_sha=prepared.head_sha,
+            created=previous is None,
         )
 
     async def _reconcile_drafts(
@@ -445,6 +464,20 @@ class PrService:
             if changed.path == path:
                 return changed
         raise NotFoundError(f"{path!r} is not a changed file in this PR")
+
+    async def changed_files(self, pr: ReadyPr) -> list[ChangedFile]:
+        """The PR's changed files, from the merge base to the head."""
+        return await self._changed_files(pr)
+
+    async def files_between(
+        self, pr: ReadyPr, old_sha: str, new_sha: str
+    ) -> list[ChangedFile] | None:
+        """Files changed from `old_sha` to `new_sha`, or None if git cannot compare them."""
+        try:
+            return await self._worktrees.changed_files(pr.repo_dir, old_sha, new_sha)
+        except GitError as e:
+            logger.info("cannot list files changed from %s to %s: %s", old_sha, new_sha, e)
+            return None
 
     async def changed_file(self, pr: ReadyPr, path: str) -> ChangedFile | None:
         return next((f for f in await self._changed_files(pr) if f.path == path), None)
@@ -592,6 +625,7 @@ class PrService:
         self._store.close_pr_review(review.id)
         self._live.pop(review.id, None)
         self._hub.publish(review.id, "review_closed")
+        self._worktree_removed(review.id)
 
     async def close_if_inactive(self, review_id: str, active_after: datetime) -> bool:
         """Close the review (see close) unless it is already closed or has activity after
@@ -628,6 +662,7 @@ class PrService:
                 mapped_clone=self._config_loader().clone_path(review.repo),
             )
             self._store.release_worktree(review_id)
+        self._worktree_removed(review_id)
         return True
 
     async def get_review(self, review_id: str) -> dict[str, object]:

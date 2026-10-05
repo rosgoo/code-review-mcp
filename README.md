@@ -153,6 +153,39 @@ A PR review holds draft review comments until you submit them as one GitHub revi
 | `DELETE /api/threads/{id}` | Delete a draft or stale thread |
 | `POST /api/reviews/{id}/submit-review` | `{event, body}` → `{github_review_id, html_url, posted}`; 403 for an event GitHub does not allow you, 409 with `stale_thread_ids` while a comment is stale |
 
+## Ask the review agent
+
+A PR review can ask a built-in Claude agent questions. The daemon runs one Claude Agent SDK session per PR review, so the agent keeps every earlier question, answer, and file it read. Answers stream into the thread.
+
+- The agent runs in the review's worktree and is read-only. It can use Read, Grep, and Glob inside the worktree, and only `git log`, `git show`, `git diff`, and `git blame` in Bash. A gate denies every other tool, every path outside the worktree, and any shell operator. It loads the repo's `CLAUDE.md` but no repo hooks and no MCP servers.
+- Its only write is `draft_review_comment`, which saves a draft (`created_by: "agent"`) that you edit or delete. Nothing goes to GitHub until you submit.
+- Each turn tells the agent what changed since its last turn: review comments, threads, files marked viewed, and a moved head.
+- One live client per review, at most `max_live_clients` (the least recently used idle one closes first). A client closes after `idle_minutes`, when the worktree is released or closed, and on shutdown; the next question resumes the same session.
+- With `warmup = "inbox"`, the first open of a PR from your direct review requests writes an overview thread: the change, its risks, and questions for the author.
+- `CODE_REVIEW_MCP_AGENT=0` turns the agent off. Each question uses your Claude account and costs money; `GET /api/reviews/{id}/agent` shows the total.
+
+```toml
+[agent]
+enabled = true
+model = "opus"
+idle_minutes = 30
+max_live_clients = 3
+max_turns = 30                 # passed to the CLI as --max-turns
+question_timeout_minutes = 5
+max_client_budget_usd = 10     # per client process; the client restarts at 80%
+warmup = "inbox"               # inbox | always | never
+```
+
+| Route | Purpose |
+|---|---|
+| `POST /api/reviews/{id}/threads` `{kind: "question", path, side, line, start_line?, start_side?, body}` | Ask about any line; `line: 0` is the file, `path: ""` + `line: 0` the whole PR |
+| `POST /api/threads/{id}/reply {message}` | A follow-up on a question thread |
+| `POST /api/threads/{id}/stop` | Stop the thread's running answer (409 if none) |
+| `GET /api/reviews/{id}/agent` | `{state, session_id, model, cost_usd, context_tokens, queue, running_thread_id, warmup}` |
+| `POST /api/reviews/{id}/agent/warmup` | Write the overview now (409 if one exists or runs) |
+
+SSE events: `agent_status`, `agent_delta {thread_id, text}`, `agent_message {thread_id, message}`, `agent_error {thread_id, error}`.
+
 ## HTTP API
 
 | Route | Purpose |

@@ -48,6 +48,8 @@ EXPECTED_COLUMNS = {
         "pr_state",
         "is_draft",
         "last_activity_at",
+        "agent_last_turn_at",
+        "agent_head_sha",
     },
     "review_files": {
         "review_id",
@@ -540,7 +542,7 @@ def test_migration_4_adds_github_ids(tmp_path: Path) -> None:
     try:
         thread = store.get_thread("t")
         [submission] = store.list_submissions("r")
-        assert store.schema_version == 4
+        assert store.schema_version == len(MIGRATIONS)
         assert thread is not None
         assert (thread.github_comment_id, thread.github_url) == (None, None)
         assert (submission.html_url, submission.commit_id) == (None, None)

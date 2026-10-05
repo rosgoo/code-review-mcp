@@ -283,7 +283,7 @@ async def test_create_rejects_bad_comments(
         name: await api.post(url, json={"kind": "review_comment", **fields})
         for name, (url, fields) in cases.items()
     }
-    wrong_kind = await api.post(base, json={"kind": "question", **SINGLE})
+    wrong_kind = await api.post(base, json={"kind": "praise", **SINGLE})
 
     assert {name: r.status_code for name, r in responses.items()} == dict.fromkeys(cases, 400)
     assert (

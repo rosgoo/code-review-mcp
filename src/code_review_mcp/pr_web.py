@@ -3,6 +3,7 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from code_review_mcp.agents import AgentRunner
 from code_review_mcp.github import InboxName
 from code_review_mcp.pr_service import PrService
 from code_review_mcp.review_threads import AnchorRequest, ThreadService
@@ -19,7 +20,7 @@ class ViewedRequest(BaseModel):
 
 
 class CreateThreadRequest(BaseModel):
-    kind: Literal["review_comment"]
+    kind: Literal["review_comment", "question"]
     path: str
     side: Side | None = None
     line: int
@@ -41,8 +42,23 @@ class SubmitReviewRequest(BaseModel):
     body: str = ""
 
 
-def build_pr_router(prs: PrService, threads: ThreadService, stacks: StackService) -> APIRouter:
+def build_pr_router(
+    prs: PrService, threads: ThreadService, stacks: StackService, agents: AgentRunner
+) -> APIRouter:
     router = APIRouter(prefix="/api")
+
+    @router.get("/reviews/{review_id}/agent")
+    async def agent_status(review_id: str) -> dict[str, object]:
+        return agents.status(review_id)
+
+    @router.post("/reviews/{review_id}/agent/warmup")
+    async def agent_warmup(review_id: str) -> dict[str, object]:
+        return await agents.start_warmup(review_id)
+
+    @router.post("/threads/{thread_id}/stop")
+    async def stop_thread(thread_id: str) -> dict[str, object]:
+        await agents.stop(thread_id)
+        return {"ok": True}
 
     @router.get("/reviews/{review_id}/stack")
     async def review_stack(review_id: str) -> dict[str, object] | None:
@@ -54,12 +70,13 @@ def build_pr_router(prs: PrService, threads: ThreadService, stacks: StackService
 
     @router.post("/reviews/{review_id}/threads")
     async def create_thread(review_id: str, body: CreateThreadRequest) -> dict[str, object]:
-        return await threads.create_thread(
-            review_id,
-            body.path,
-            AnchorRequest(body.side, body.line, body.start_line, body.start_side),
-            body.body,
-        )
+        anchor = AnchorRequest(body.side, body.line, body.start_line, body.start_side)
+        if body.kind == "question":
+            agents.require_on()
+            thread = threads.create_question(review_id, body.path, anchor, body.body)
+            agents.ask(str(thread["id"]))
+            return thread
+        return await threads.create_thread(review_id, body.path, anchor, body.body)
 
     @router.patch("/threads/{thread_id}")
     async def update_thread(thread_id: str, body: UpdateThreadRequest) -> dict[str, object]:

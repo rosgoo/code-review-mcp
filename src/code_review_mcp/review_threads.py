@@ -21,6 +21,7 @@ from code_review_mcp.review_rules import (
     normalize_anchor,
 )
 from code_review_mcp.store import (
+    Author,
     MessageRow,
     ReviewRow,
     Side,
@@ -131,7 +132,13 @@ class ThreadService:
         return current
 
     async def create_thread(
-        self, review_id: str, path: str, request: AnchorRequest, body: str
+        self,
+        review_id: str,
+        path: str,
+        request: AnchorRequest,
+        body: str,
+        *,
+        created_by: Author = "user",
     ) -> dict[str, object]:
         """Create a draft review comment at the review's current head.
 
@@ -154,13 +161,53 @@ class ThreadService:
                 start_line=anchor.start_line,
                 start_side=anchor.start_side,
                 status="draft",
-                author="user",
+                author=created_by,
                 body=cleaned,
                 anchor_sha=pr.head_sha,
             )
         result = self._thread_json(thread.id)
         self._hub.publish(review_id, "thread_added", {"thread": result})
         return result
+
+    def create_question(
+        self, review_id: str, path: str, request: AnchorRequest, body: str
+    ) -> dict[str, object]:
+        """Create a question thread for the review agent, with status submitted.
+
+        Any line may take a question. Line 0 is about the file, and path "" with line 0 is
+        about the whole PR. Raises ReviewError (400) for a local or closed review, a bad
+        position or path, or an empty body.
+        """
+        review = self._prs.require_pr_review(review_id)
+        if review.status == "closed":
+            raise ReviewError(f"Review {review_id!r} is closed. Open the PR again to ask.")
+        cleaned = _clean_body(body)
+        if path.startswith("/") or ".." in path.split("/"):
+            raise ReviewError(f"{path!r} must be a path inside the repository")
+        if not path and request.line != 0:
+            raise ReviewError('A question about the whole PR (path "") must use line 0')
+        anchor = normalize_anchor(
+            request.side, request.line, request.start_line, request.start_side
+        )
+        thread = self._store.create_thread(
+            review_id=review_id,
+            kind="question",
+            path=path,
+            side=anchor.side,
+            line=anchor.line,
+            start_line=anchor.start_line,
+            start_side=anchor.start_side,
+            status="submitted",
+            author="user",
+            body=cleaned,
+            anchor_sha=review.head_sha,
+        )
+        result = self._thread_json(thread.id)
+        self._hub.publish(review_id, "thread_added", {"thread": result})
+        return result
+
+    def thread_json(self, thread_id: str) -> dict[str, object]:
+        return self._thread_json(thread_id)
 
     async def update_thread(
         self, thread_id: str, *, body: str | None, anchor: AnchorRequest | None

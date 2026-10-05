@@ -14,6 +14,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from code_review_mcp.agent_sdk import open_sdk_session
+from code_review_mcp.agents import AgentRunner, SessionFactory
 from code_review_mcp.cleanup import WorktreeSweeper
 from code_review_mcp.config import Settings
 from code_review_mcp.errors import (
@@ -87,7 +89,13 @@ class ApiOriginGuard:
         await self._app(scope, receive, send)
 
 
-def build_api_router(service: ReviewService, hub: ReviewHub, store: Store) -> APIRouter:
+def build_api_router(
+    service: ReviewService,
+    hub: ReviewHub,
+    store: Store,
+    threads: ThreadService,
+    agents: AgentRunner,
+) -> APIRouter:
     router = APIRouter(prefix="/api")
 
     @router.get("/health")
@@ -127,7 +135,17 @@ def build_api_router(service: ReviewService, hub: ReviewHub, store: Store) -> AP
 
     @router.post("/threads/{thread_id}/reply")
     async def reply(thread_id: str, body: ReplyRequest) -> dict[str, object]:
+        thread = store.get_thread(thread_id)
+        question = thread is not None and thread.kind == "question"
+        if question:
+            agents.require_on()
         result = service.reply(thread_id, "user", body.message)
+        if question:
+            assert thread is not None
+            hub.publish(
+                thread.review_id, "thread_updated", {"thread": threads.thread_json(thread_id)}
+            )
+            agents.ask(thread_id)
         return {"id": result.message.id, "reopened": result.reopened}
 
     @router.get("/events")
@@ -161,6 +179,7 @@ def create_app(
     *,
     github: GitHubClient | None = None,
     worktrees: WorktreeManager | None = None,
+    agent_sessions: SessionFactory | None = None,
 ) -> FastAPI:
     """Build the daemon app: REST + SSE under /api, MCP (streamable HTTP) at /mcp, the UI at
     / and /r/{review_id}, and its built assets under /static.
@@ -182,6 +201,16 @@ def create_app(
         store, hub, prs, github_client, GitHubReviewWriter(github_client.runner)
     )
     stacks = StackService(store, StackFinder(github_client))
+    agents = AgentRunner(
+        store,
+        hub,
+        settings,
+        prs,
+        threads,
+        github_client,
+        lambda: load_repo_config(settings.home),
+        agent_sessions or open_sdk_session,
+    )
     security = transport_security(settings)
     mcp = build_mcp(service, prs, security)
     mcp_app = mcp.streamable_http_app()
@@ -190,14 +219,17 @@ def create_app(
     async def lifespan(running_app: FastAPI) -> AsyncIterator[None]:
         sweep = asyncio.create_task(sweeper.run_forever()) if settings.cleanup_enabled else None
         running_app.state.sweep_task = sweep
+        reaper = asyncio.create_task(agents.run_reaper())
         try:
             async with mcp.session_manager.run():
                 yield
         finally:
-            if sweep is not None:
-                sweep.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await sweep
+            for task in (sweep, reaper):
+                if task is not None:
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+            await agents.shutdown()
             store.close()
 
     app = FastAPI(
@@ -211,6 +243,7 @@ def create_app(
     app.state.prs = prs
     app.state.threads = threads
     app.state.stacks = stacks
+    app.state.agents = agents
     app.state.sweeper = sweeper
     app.state.mcp = mcp
 
@@ -242,8 +275,8 @@ def create_app(
     async def review_error(_: Request, exc: ReviewError) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
-    app.include_router(build_api_router(service, hub, store))
-    app.include_router(build_pr_router(prs, threads, stacks))
+    app.include_router(build_api_router(service, hub, store, threads, agents))
+    app.include_router(build_pr_router(prs, threads, stacks, agents))
     # Mount("/mcp") would answer POST /mcp with a 307 to /mcp/, so add the route itself.
     app.router.routes.extend(mcp_app.routes)
     app.mount("/static", RevalidatedStaticFiles(directory=STATIC_DIR), name="static")

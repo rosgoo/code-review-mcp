@@ -119,6 +119,10 @@ MIGRATIONS: list[str] = [
     ALTER TABLE submissions ADD COLUMN html_url TEXT;
     ALTER TABLE submissions ADD COLUMN commit_id TEXT;
     """,
+    """
+    ALTER TABLE reviews ADD COLUMN agent_last_turn_at TEXT;
+    ALTER TABLE reviews ADD COLUMN agent_head_sha TEXT;
+    """,
 ]
 
 
@@ -154,6 +158,8 @@ class ReviewRow:
     pr_state: str | None
     is_draft: bool
     last_activity_at: str | None
+    agent_last_turn_at: str | None
+    agent_head_sha: str | None
 
 
 @dataclass(frozen=True)
@@ -680,6 +686,33 @@ class Store:
             "UPDATE threads SET anchor_sha = ?, updated_at = ? WHERE id = ?",
             (anchor_sha, utc_now(), thread_id),
         )
+
+    def set_agent_session_id(self, review_id: str, session_id: str) -> None:
+        self._conn.execute(
+            "UPDATE reviews SET agent_session_id = ? WHERE id = ?", (session_id, review_id)
+        )
+
+    def add_agent_cost(self, review_id: str, cost_usd: float) -> None:
+        self._conn.execute(
+            "UPDATE reviews SET agent_cost_usd = agent_cost_usd + ? WHERE id = ?",
+            (cost_usd, review_id),
+        )
+
+    def record_agent_turn(self, review_id: str, *, at: str, head_sha: str | None) -> None:
+        """Remember when the agent last saw the review, and at which head."""
+        self._conn.execute(
+            "UPDATE reviews SET agent_last_turn_at = ?, agent_head_sha = ? WHERE id = ?",
+            (at, head_sha, review_id),
+        )
+
+    def viewed_since(self, review_id: str, head_sha: str, since: str | None) -> list[str]:
+        """Paths marked viewed at `head_sha` after `since` (every viewed path if None)."""
+        rows = self._conn.execute(
+            "SELECT path FROM viewed_files WHERE review_id = ? AND head_sha = ?"
+            " AND (? IS NULL OR viewed_at > ?) ORDER BY viewed_at, path",
+            (review_id, head_sha, since, since),
+        ).fetchall()
+        return [row["path"] for row in rows]
 
     def thread_status_counts(self, review_id: str, *, kind: ThreadKind) -> dict[str, int]:
         rows = self._conn.execute(

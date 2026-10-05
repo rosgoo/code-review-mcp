@@ -5,6 +5,8 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from code_review_mcp import web
+from code_review_mcp.agents import AgentSession, SessionSpec
 from code_review_mcp.config import Settings
 from code_review_mcp.hub import ReviewHub
 from code_review_mcp.service import ReviewService
@@ -27,9 +29,24 @@ diff --git a/app.py b/app.py
 SAMPLE_NEW_FILE = "import os\nx = 2\nprint(x)\n"
 
 
+async def _no_real_agent(spec: SessionSpec) -> AgentSession:
+    raise AssertionError(f"a test tried to start a real agent client for {spec.review_id}")
+
+
+@pytest.fixture(autouse=True)
+def no_real_agent_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(web, "open_sdk_session", _no_real_agent)
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(home=tmp_path / "home", host="127.0.0.1", port=7791, open_browser=False)
+    return Settings(
+        home=tmp_path / "home",
+        host="127.0.0.1",
+        port=7791,
+        open_browser=False,
+        agent_enabled=False,
+    )
 
 
 @pytest.fixture

@@ -1,10 +1,12 @@
 import argparse
 import logging
+import os
 import sys
 from collections.abc import Sequence
 
 import uvicorn
 
+from code_review_mcp.agents import scrub_agent_env
 from code_review_mcp.config import load_settings
 from code_review_mcp.store import Store
 from code_review_mcp.web import create_app
@@ -42,6 +44,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     app_logger.addHandler(log_handler)
     app_logger.setLevel(logging.INFO)
     app_logger.propagate = False
+
+    removed = scrub_agent_env(os.environ)
+    if removed:
+        app_logger.info("removed %s from the environment of agent clients", ", ".join(removed))
 
     store = Store.open(settings.db_path)
     print(f"code-review-mcp: state in {settings.db_path}", file=sys.stderr)

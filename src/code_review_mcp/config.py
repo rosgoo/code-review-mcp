@@ -17,6 +17,7 @@ class Settings:
     port: int
     open_browser: bool
     cleanup_enabled: bool = True
+    agent_enabled: bool = True
 
     @property
     def db_path(self) -> Path:
@@ -36,7 +37,8 @@ def load_settings(port: int | None = None, host: str | None = None) -> Settings:
 
     Environment: CODE_REVIEW_MCP_HOME (data dir), CODE_REVIEW_MCP_PORT,
     CODE_REVIEW_MCP_BROWSER ("0", "false", "no" or "off" disables opening a browser),
-    CODE_REVIEW_MCP_CLEANUP (the same values disable the worktree cleanup task).
+    CODE_REVIEW_MCP_CLEANUP (the same values disable the worktree cleanup task),
+    CODE_REVIEW_MCP_AGENT (the same values turn the review agent off).
     Raises ValueError if CODE_REVIEW_MCP_PORT is not an integer.
     """
     home = Path(os.environ.get("CODE_REVIEW_MCP_HOME") or DEFAULT_HOME).expanduser()
@@ -44,10 +46,12 @@ def load_settings(port: int | None = None, host: str | None = None) -> Settings:
         port = int(os.environ.get("CODE_REVIEW_MCP_PORT") or DEFAULT_PORT)
     browser_flag = os.environ.get("CODE_REVIEW_MCP_BROWSER", "1").strip().lower()
     cleanup_flag = os.environ.get("CODE_REVIEW_MCP_CLEANUP", "1").strip().lower()
+    agent_flag = os.environ.get("CODE_REVIEW_MCP_AGENT", "1").strip().lower()
     return Settings(
         home=home,
         host=host or DEFAULT_HOST,
         port=port,
         open_browser=browser_flag not in _FALSE_VALUES,
         cleanup_enabled=cleanup_flag not in _FALSE_VALUES,
+        agent_enabled=agent_flag not in _FALSE_VALUES,
     )
