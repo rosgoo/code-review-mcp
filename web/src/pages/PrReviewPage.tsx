@@ -6,7 +6,15 @@ import { fileDomId } from "../components/FileViews";
 import { FileTree, type FileDetail } from "../components/FileTree";
 import { Link } from "../components/Link";
 import { Markdown } from "../components/Markdown";
+import {
+  PrCommentActionsContext,
+  PrCommentStateContext,
+  type PrCommentActions,
+} from "../components/PrCommentContext";
+import { PrCommentsPanel } from "../components/PrCommentsPanel";
 import { PrFileCard, type FileLoad } from "../components/PrFileCard";
+import { PrReviewBar } from "../components/PrReviewBar";
+import { reviewThreadDomId } from "../components/ReviewThreads";
 import { errorMessage } from "../components/Thread";
 import { api } from "../lib/api";
 import { jumpTo } from "../lib/dom";
@@ -25,8 +33,47 @@ import {
   type CollapseOverrides,
   type HeadMovedEvent,
 } from "../lib/pr";
+import {
+  EVENT_LABELS,
+  applyThreadEvent,
+  countThreads,
+  locationLabel,
+  pendingThreads,
+  placeThreads,
+  threadEventNeedsRefetch,
+  threadLocation,
+} from "../lib/review";
 import { navigationState } from "../lib/router";
-import type { PrFile, PrView } from "../lib/types";
+import type {
+  PrFile,
+  PrView,
+  ReviewAnchor,
+  ReviewEventName,
+  ReviewThread,
+  SubmitReviewResult,
+} from "../lib/types";
+
+const HINT_MS = 5000;
+
+const sameAnchor = (a: ReviewAnchor | null, b: ReviewAnchor | null) =>
+  a !== null &&
+  b !== null &&
+  a.path === b.path &&
+  a.side === b.side &&
+  a.line === b.line &&
+  a.start_line === b.start_line &&
+  a.start_side === b.start_side;
+
+const upsert = (threads: readonly ReviewThread[], thread: ReviewThread) =>
+  threads.some((t) => t.id === thread.id)
+    ? threads.map((t) => (t.id === thread.id ? thread : t))
+    : [...threads, thread];
+
+interface Submitted {
+  event: ReviewEventName;
+  url: string | null;
+  posted: number | null;
+}
 
 type Busy = "refresh" | "reload" | "close" | "reopen";
 
@@ -99,6 +146,13 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
   const [scrollRoot, setScrollRoot] = useState<HTMLElement | null>(null);
   const requested = useRef(new Set<string>());
   const elapsed = useElapsedSeconds(busy?.startedAt ?? null);
+  const [threads, setThreads] = useState<readonly ReviewThread[]>([]);
+  const [composer, setComposer] = useState<ReviewAnchor | null>(null);
+  const [reanchoring, setReanchoring] = useState<string | null>(null);
+  const [hint, setHint] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState<Submitted | null>(null);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const hintTimer = useRef<number | undefined>(undefined);
 
   const loadPr = useCallback(async () => {
     try {
@@ -109,13 +163,45 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
     }
   }, [reviewId]);
 
+  const loadThreads = useCallback(async () => {
+    try {
+      setThreads(await api.reviewThreads(reviewId));
+    } catch {
+      // A failed refresh keeps the last list; the next event or reload tries again.
+    }
+  }, [reviewId]);
+
   useEffect(() => {
     void loadPr();
-  }, [loadPr]);
+    void loadThreads();
+  }, [loadPr, loadThreads]);
+
+  useEffect(() => () => window.clearTimeout(hintTimer.current), []);
+
+  const showHint = useCallback((message: string) => {
+    window.clearTimeout(hintTimer.current);
+    setHint(message);
+    hintTimer.current = window.setTimeout(() => setHint(null), HINT_MS);
+  }, []);
 
   useReviewEvents(reviewId, (event) => {
     if (event.type === "head_moved") setLatestMove(event);
-    else if (event.type === "review_closed" || event.type === "view_updated") void loadPr();
+    else if (event.type === "connected") void loadThreads();
+    else if (event.type === "review_closed") void loadPr();
+    else if (event.type === "view_updated") {
+      void loadPr();
+      void loadThreads();
+    } else if (event.type === "review_submitted") {
+      void loadPr();
+      void loadThreads();
+      if (event.html_url && event.event) {
+        setSubmitted({ event: event.event, url: event.html_url, posted: null });
+      }
+    } else if (threadEventNeedsRefetch(event)) {
+      void loadThreads();
+    } else {
+      setThreads((current) => applyThreadEvent(current, event) ?? current);
+    }
   });
 
   useEffect(() => {
@@ -225,6 +311,83 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
     [loadFile],
   );
 
+  const threadsById = useMemo(() => new Map(threads.map((t) => [t.id, t])), [threads]);
+
+  const commentActions = useMemo<PrCommentActions>(
+    () => ({
+      openComposer(anchor) {
+        setComposer((current) => (sameAnchor(current, anchor) ? current : anchor));
+        if (anchor !== null) setReanchoring(null);
+      },
+      async addComment(anchor, body) {
+        const thread = await api.createReviewThread(reviewId, {
+          kind: "review_comment",
+          ...anchor,
+          body,
+        });
+        setThreads((current) => upsert(current, thread));
+        setComposer((current) => (sameAnchor(current, anchor) ? null : current));
+      },
+      async editComment(threadId, body) {
+        const thread = await api.editReviewThread(threadId, body);
+        setThreads((current) => upsert(current, thread));
+      },
+      async deleteComment(threadId) {
+        await api.deleteReviewThread(threadId);
+        setThreads((current) => current.filter((t) => t.id !== threadId));
+        setReanchoring((current) => (current === threadId ? null : current));
+      },
+      startReanchor(threadId) {
+        setReanchoring(threadId);
+        if (threadId !== null) setComposer(null);
+      },
+      pickLines(path, result) {
+        if (!result.ok) {
+          showHint(result.hint);
+          return;
+        }
+        const { anchor } = result;
+        const moving = reanchoringRef.current;
+        if (moving === null) {
+          setComposer((current) => (sameAnchor(current, anchor) ? current : anchor));
+          if (result.clamped) {
+            showHint(`The selection was trimmed to ${locationLabel(anchor)}, the part inside the diff.`);
+          }
+          return;
+        }
+        const thread = threadsByIdRef.current.get(moving);
+        if (thread === undefined) {
+          setReanchoring(null);
+          return;
+        }
+        if (thread.path !== path) {
+          showHint(`Pick a line in ${thread.path} to move this comment.`);
+          return;
+        }
+        setReanchoring(null);
+        const { path: _path, ...position } = anchor;
+        api.reanchorReviewThread(moving, position).then(
+          (updated) => {
+            setThreads((current) => upsert(current, updated));
+            showHint(`Moved the comment to ${locationLabel(anchor)}.`);
+          },
+          (e: unknown) => showHint(`Could not move the comment: ${errorMessage(e)}`),
+        );
+      },
+    }),
+    [reviewId, showHint],
+  );
+  const threadsByIdRef = useRef(threadsById);
+  const reanchoringRef = useRef(reanchoring);
+  useEffect(() => {
+    threadsByIdRef.current = threadsById;
+    reanchoringRef.current = reanchoring;
+  }, [threadsById, reanchoring]);
+  const commentState = useMemo(
+    () => ({ threadsById, composer, reanchoring }),
+    [threadsById, composer, reanchoring],
+  );
+
   const files = useMemo(() => pr?.files ?? [], [pr]);
   const paths = useMemo(() => files.map((f) => f.path), [files]);
   const counts = useMemo(
@@ -242,6 +405,47 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
     [files],
   );
   const viewedCount = files.filter((f) => f.viewed).length;
+  const placed = useMemo(() => placeThreads(threads, pr?.head_sha ?? null), [threads, pr]);
+  const pending = useMemo(() => pendingThreads(threads, paths), [threads, paths]);
+  const draftThreads = useMemo(() => pending.filter((t) => t.status === "draft"), [pending]);
+  const staleThreads = useMemo(() => pending.filter((t) => t.status === "stale"), [pending]);
+  const { drafts: draftCount, stale: staleCount } = countThreads(threads);
+  const movingThread = reanchoring === null ? undefined : threadsById.get(reanchoring);
+  const commenting = pr !== null && pr.status !== "closed";
+
+  const jumpToThread = useCallback((thread: ReviewThread) => {
+    setOverrides((current) => new Map(current).set(thread.path, false));
+    window.requestAnimationFrame(() =>
+      window.requestAnimationFrame(() => {
+        const id = document.getElementById(reviewThreadDomId(thread.id))
+          ? reviewThreadDomId(thread.id)
+          : fileDomId(thread.path);
+        jumpTo(id);
+      }),
+    );
+  }, []);
+
+  const onSubmitted = useCallback(
+    (result: SubmitReviewResult, event: ReviewEventName) => {
+      setSubmitted({ event, url: result.html_url, posted: result.posted });
+      void loadThreads();
+      void loadPr();
+    },
+    [loadThreads, loadPr],
+  );
+  const onStale = useCallback(
+    (ids: readonly string[]) => {
+      if (ids.length === 0) {
+        void loadThreads();
+        return;
+      }
+      const stale = new Set(ids);
+      setThreads((current) =>
+        current.map((t) => (stale.has(t.id) ? { ...t, status: "stale" as const } : t)),
+      );
+    },
+    [loadThreads],
+  );
   const banner = headMovedBanner(pr?.head_sha ?? null, latestMove);
   const reopenTarget = pr ? pr.github_url ?? prLabel(pr.repo, pr.number) : "";
 
@@ -282,6 +486,9 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
         collapsed={isCollapsed(file, overrides)}
         diffStyle={diffStyle}
         scrollRoot={scrollRoot}
+        placed={placed.get(file.path)}
+        composer={composer !== null && composer.path === file.path ? composer : null}
+        commenting={commenting}
         onLoad={onLoad}
         onToggleCollapsed={onToggleCollapsed}
         onToggleViewed={onToggleViewed}
@@ -290,7 +497,9 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
   }
 
   return (
-    <div className="pr-page">
+    <PrCommentActionsContext.Provider value={commentActions}>
+    <PrCommentStateContext.Provider value={commentState}>
+    <div className={commenting ? "pr-page with-review-bar" : "pr-page"}>
       <header className="topbar">
         <button
           type="button"
@@ -327,6 +536,14 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
               onClick={() => void refresh()}
             >
               Refresh
+            </button>
+            <button
+              type="button"
+              className="button"
+              aria-expanded={panelOpen}
+              onClick={() => setPanelOpen(!panelOpen)}
+            >
+              Drafts <span className="count">{draftCount + staleCount}</span>
             </button>
             <button
               type="button"
@@ -397,6 +614,47 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
             </button>
           </div>
         )}
+        {submitted && (
+          <div className="banner banner-success" role="status">
+            <span>
+              Review submitted to GitHub: {EVENT_LABELS[submitted.event]}
+              {submitted.posted !== null &&
+                ` with ${submitted.posted} comment${submitted.posted === 1 ? "" : "s"}`}
+              .
+            </span>
+            {submitted.url && (
+              <a href={submitted.url} target="_blank" rel="noreferrer noopener">
+                View on GitHub ↗
+              </a>
+            )}
+            <span className="spacer" />
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="Dismiss"
+              onClick={() => setSubmitted(null)}
+            >
+              ×
+            </button>
+          </div>
+        )}
+        {movingThread && (
+          <div className="banner banner-warning" role="status">
+            <span>
+              Moving the comment from {threadLocation(movingThread)}: click + on a highlighted line
+              in {movingThread.path}.
+            </span>
+            <span className="spacer" />
+            <button type="button" className="button" onClick={() => setReanchoring(null)}>
+              Cancel
+            </button>
+          </div>
+        )}
+        {hint && (
+          <div className="banner banner-info hint" role="status">
+            {hint}
+          </div>
+        )}
         {(actionError || (loadError && pr)) && (
           <div className="banner banner-error" role="alert">
             {actionError ?? loadError}
@@ -429,6 +687,25 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
           {body}
         </main>
       </div>
+      {panelOpen && commenting && (
+        <PrCommentsPanel
+          threads={pending}
+          onJump={jumpToThread}
+          onClose={() => setPanelOpen(false)}
+        />
+      )}
+      {pr && commenting && (
+        <PrReviewBar
+          pr={pr}
+          drafts={draftThreads}
+          stale={staleThreads}
+          onJumpToThread={jumpToThread}
+          onSubmitted={onSubmitted}
+          onStale={onStale}
+        />
+      )}
     </div>
+    </PrCommentStateContext.Provider>
+    </PrCommentActionsContext.Provider>
   );
 }

@@ -16,7 +16,11 @@ export function useDiffStyle(): [DiffStyle, (style: DiffStyle) => void] {
   return [style, update];
 }
 
-/** Subscribe to the review's SSE stream. A reconnect is reported as a view_updated. */
+/**
+ * Subscribe to the review's SSE stream. The first connection is reported as connected,
+ * so a page can fetch a snapshot taken after it subscribed. A reconnect is reported as
+ * a view_updated.
+ */
 export function useReviewEvents(reviewId: string, onEvent: (event: ReviewEvent) => void) {
   const handler = useRef(onEvent);
   useEffect(() => {
@@ -34,7 +38,7 @@ export function useReviewEvents(reviewId: string, onEvent: (event: ReviewEvent) 
       }
       if (event.type === "connected") {
         connections += 1;
-        if (connections > 1) handler.current({ type: "view_updated" });
+        handler.current(connections > 1 ? { type: "view_updated" } : event);
         return;
       }
       handler.current(event);

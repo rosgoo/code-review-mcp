@@ -1,10 +1,26 @@
-import type { DiffFileInput } from "@pierre/diffs";
-import { MultiFileDiff, type FileDiffOptions } from "@pierre/diffs/react";
-import { memo, useEffect, useMemo, useRef, type ReactNode } from "react";
+import type { DiffFileInput, DiffLineAnnotation, SelectedLineRange } from "@pierre/diffs";
+import { MultiFileDiff, useStableCallback, type FileDiffOptions } from "@pierre/diffs/react";
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import type { AnnotationData } from "../lib/annotations";
 import { useNearViewport } from "../lib/hooks";
 import { estimatedDiffHeight, statusLetter } from "../lib/pr";
-import type { DiffStyle, PrFile, PrFileContent } from "../lib/types";
+import {
+  clampSelection,
+  isCommentable,
+  reviewAnnotations,
+  type PlacedThreads,
+} from "../lib/review";
+import type {
+  Commentable,
+  DiffStyle,
+  PrFile,
+  PrFileContent,
+  ReviewAnchor,
+  Side,
+} from "../lib/types";
 import { fileDomId } from "./FileViews";
+import { usePrCommentActions } from "./PrCommentContext";
+import { FileThreadsBlock, ReviewAnnotation } from "./ReviewThreads";
 
 export type FileLoad =
   | { state: "loading" }
@@ -26,48 +42,159 @@ function diffInput(content: PrFileContent): DiffFileInput | null {
 
 function Placeholder({ children, height }: { children: ReactNode; height?: number }) {
   return (
-    <div className="file-placeholder" style={height === undefined ? undefined : { minHeight: height }}>
+    <div
+      className="file-placeholder"
+      style={height === undefined ? undefined : { minHeight: height }}
+    >
       {children}
     </div>
   );
 }
 
-function FileBody({
-  file,
-  load,
-  diffStyle,
-  onRetry,
+interface HoveredLine {
+  lineNumber: number;
+  side: Side;
+}
+
+/**
+ * The last line the pointer entered. Leaving a line does not clear it, because moving
+ * onto the + button leaves the line, and the button must stay to be clicked.
+ */
+function createHoverStore() {
+  let line: HoveredLine | null = null;
+  const listeners = new Set<() => void>();
+  return {
+    enter(next: HoveredLine) {
+      if (line !== null && line.lineNumber === next.lineNumber && line.side === next.side) return;
+      line = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    get: () => line,
+  };
+}
+
+type HoverStore = ReturnType<typeof createHoverStore>;
+
+function GutterPlus({
+  hover,
+  commentable,
+  onPick,
 }: {
-  file: PrFile;
-  load: FileLoad | undefined;
-  diffStyle: DiffStyle;
-  onRetry(): void;
+  hover: HoverStore;
+  commentable: Commentable | undefined;
+  onPick(range: SelectedLineRange): void;
 }) {
-  const content = load?.state === "loaded" ? load.content : null;
-  const input = useMemo(() => (content === null ? null : diffInput(content)), [content]);
-  const options = useMemo<FileDiffOptions<undefined, undefined>>(
-    () => ({ diffStyle, disableFileHeader: true }),
-    [diffStyle],
+  const line = useSyncExternalStore(hover.subscribe, hover.get);
+  const button = useRef<HTMLButtonElement>(null);
+  const latest = useRef({ line, onPick });
+  useEffect(() => {
+    latest.current = { line, onPick };
+  });
+  useEffect(() => {
+    const element = button.current;
+    if (element === null) return;
+    // The diff listens on its own <pre>; stopping here keeps a press on + from also
+    // starting the diff's line selection.
+    const stop = (event: Event) => event.stopPropagation();
+    const click = (event: Event) => {
+      event.stopPropagation();
+      const picked = latest.current.line;
+      if (picked !== null) {
+        latest.current.onPick({ start: picked.lineNumber, end: picked.lineNumber, side: picked.side });
+      }
+    };
+    element.addEventListener("pointerdown", stop);
+    element.addEventListener("click", click);
+    return () => {
+      element.removeEventListener("pointerdown", stop);
+      element.removeEventListener("click", click);
+    };
+  });
+  if (line === null || !isCommentable(commentable, line.side, line.lineNumber)) return null;
+  return (
+    <button
+      ref={button}
+      type="button"
+      className="gutter-plus"
+      aria-label="Add a review comment"
+      title="Add a review comment"
+    >
+      +
+    </button>
+  );
+}
+
+const renderReviewAnnotation = (annotation: DiffLineAnnotation<AnnotationData>) => (
+  <ReviewAnnotation data={annotation.metadata} />
+);
+
+function FileDiffView({
+  path,
+  content,
+  diffStyle,
+  placed,
+  composer,
+  commenting,
+}: {
+  path: string;
+  content: PrFileContent;
+  diffStyle: DiffStyle;
+  placed: PlacedThreads | undefined;
+  composer: ReviewAnchor | null;
+  commenting: boolean;
+}) {
+  const actions = usePrCommentActions();
+  const input = useMemo(() => diffInput(content), [content]);
+  const hover = useMemo(createHoverStore, []);
+  // The diff keeps a line selection of its own and pins the + to its end. Clear it after
+  // a pick that opens no line composer here, and when this file's composer closes, so
+  // the + follows the pointer again.
+  const [clearSelection, setClearSelection] = useState(false);
+  const [picks, setPicks] = useState(0);
+  const awaitingPick = useRef(false);
+  const previousComposer = useRef(composer);
+  useEffect(() => {
+    const openedHere = composer !== null && composer.line > 0;
+    const closed = previousComposer.current !== null && composer === null;
+    previousComposer.current = composer;
+    if (closed || (awaitingPick.current && !openedHere)) setClearSelection(true);
+    awaitingPick.current = false;
+  }, [composer, picks]);
+  useEffect(() => {
+    if (clearSelection) setClearSelection(false);
+  }, [clearSelection]);
+  const onRange = useStableCallback((range: SelectedLineRange) => {
+    actions.pickLines(path, clampSelection(path, range, content.commentable));
+    awaitingPick.current = true;
+    setPicks((count) => count + 1);
+  });
+  const options = useMemo<FileDiffOptions<AnnotationData, undefined>>(
+    () => ({
+      diffStyle,
+      disableFileHeader: true,
+      ...(commenting
+        ? {
+            enableGutterUtility: true,
+            enableLineSelection: true,
+            onLineSelected: (range: SelectedLineRange | null) => {
+              if (range !== null) onRange(range);
+            },
+            onLineEnter: ({ lineNumber, annotationSide }: { lineNumber: number; annotationSide: Side }) =>
+              hover.enter({ lineNumber, side: annotationSide }),
+          }
+        : {}),
+    }),
+    [diffStyle, commenting, onRange, hover],
+  );
+  const lineAnnotations = useMemo(
+    () => reviewAnnotations(placed?.inline ?? [], composer),
+    [placed, composer],
   );
 
-  if (file.binary) return <Placeholder>Binary file not shown.</Placeholder>;
-  if (load === undefined || load.state === "loading") {
-    return <Placeholder height={estimatedDiffHeight(file)}>Loading…</Placeholder>;
-  }
-  if (load.state === "error") {
-    return (
-      <Placeholder>
-        <span className="form-error">{load.message}</span>{" "}
-        <button type="button" className="link-button" onClick={onRetry}>
-          Retry
-        </button>
-      </Placeholder>
-    );
-  }
-  if (load.content.binary) return <Placeholder>Binary file not shown.</Placeholder>;
-  if (load.content.too_large) {
-    return <Placeholder>This file is too large to show here. Open it on GitHub.</Placeholder>;
-  }
   if (input === null) return <Placeholder>No content.</Placeholder>;
   if (
     input.oldFile !== null &&
@@ -76,7 +203,79 @@ function FileBody({
   ) {
     return <Placeholder>No content changes.</Placeholder>;
   }
-  return <MultiFileDiff {...input} options={options} />;
+  return (
+    <MultiFileDiff
+      {...input}
+      options={options}
+      selectedLines={clearSelection ? null : undefined}
+      lineAnnotations={lineAnnotations}
+      renderAnnotation={renderReviewAnnotation}
+      renderGutterUtility={
+        commenting
+          ? () => (
+              <GutterPlus
+                hover={hover}
+                commentable={content.commentable}
+                onPick={onRange}
+              />
+            )
+          : undefined
+      }
+    />
+  );
+}
+
+function FileBody({
+  file,
+  load,
+  diffStyle,
+  placed,
+  composer,
+  commenting,
+  onRetry,
+}: {
+  file: PrFile;
+  load: FileLoad | undefined;
+  diffStyle: DiffStyle;
+  placed: PlacedThreads | undefined;
+  composer: ReviewAnchor | null;
+  commenting: boolean;
+  onRetry(): void;
+}) {
+  let diff: ReactNode;
+  if (file.binary) diff = <Placeholder>Binary file not shown.</Placeholder>;
+  else if (load === undefined || load.state === "loading") {
+    diff = <Placeholder height={estimatedDiffHeight(file)}>Loading…</Placeholder>;
+  } else if (load.state === "error") {
+    diff = (
+      <Placeholder>
+        <span className="form-error">{load.message}</span>{" "}
+        <button type="button" className="link-button" onClick={onRetry}>
+          Retry
+        </button>
+      </Placeholder>
+    );
+  } else if (load.content.binary) diff = <Placeholder>Binary file not shown.</Placeholder>;
+  else if (load.content.too_large) {
+    diff = <Placeholder>This file is too large to show here. Open it on GitHub.</Placeholder>;
+  } else {
+    diff = (
+      <FileDiffView
+        path={file.path}
+        content={load.content}
+        diffStyle={diffStyle}
+        placed={placed}
+        composer={composer}
+        commenting={commenting}
+      />
+    );
+  }
+  return (
+    <>
+      <FileThreadsBlock threads={placed?.block ?? []} composer={composer} />
+      {diff}
+    </>
+  );
 }
 
 interface PrFileCardProps {
@@ -86,6 +285,10 @@ interface PrFileCardProps {
   collapsed: boolean;
   diffStyle: DiffStyle;
   scrollRoot: Element | null;
+  placed: PlacedThreads | undefined;
+  /** The open composer when it belongs to this file, else null. */
+  composer: ReviewAnchor | null;
+  commenting: boolean;
   onLoad(path: string, head: string, force?: boolean): void;
   onToggleCollapsed(file: PrFile): void;
   onToggleViewed(path: string, viewed: boolean): void;
@@ -102,13 +305,18 @@ export const PrFileCard = memo(function PrFileCard({
   collapsed,
   diffStyle,
   scrollRoot,
+  placed,
+  composer,
+  commenting,
   onLoad,
   onToggleCollapsed,
   onToggleViewed,
 }: PrFileCardProps) {
+  const actions = usePrCommentActions();
   const ref = useRef<HTMLElement>(null);
   const near = useNearViewport(ref, scrollRoot, "600px");
   const wantsContent = near && !collapsed && !file.binary;
+  const threadCount = (placed?.inline.length ?? 0) + (placed?.block.length ?? 0);
 
   useEffect(() => {
     if (wantsContent && load === undefined) onLoad(file.path, head);
@@ -157,7 +365,24 @@ export const PrFileCard = memo(function PrFileCard({
             </>
           )}
         </span>
+        {threadCount > 0 && (
+          <span className="tag" title="Review comments on this file">
+            {threadCount} comment{threadCount === 1 ? "" : "s"}
+          </span>
+        )}
         <span className="spacer" />
+        {commenting && (
+          <button
+            type="button"
+            className="button button-small"
+            onClick={() => {
+              if (collapsed) onToggleCollapsed(file);
+              actions.openComposer({ path: file.path, side: "additions", line: 0 });
+            }}
+          >
+            Comment on file
+          </button>
+        )}
         <label className="viewed-toggle">
           <input
             type="checkbox"
@@ -172,6 +397,9 @@ export const PrFileCard = memo(function PrFileCard({
           file={file}
           load={load}
           diffStyle={diffStyle}
+          placed={placed}
+          composer={composer}
+          commenting={commenting}
           onRetry={() => onLoad(file.path, head, true)}
         />
       )}

@@ -3,11 +3,16 @@ import type {
   InboxList,
   InboxName,
   NewComment,
+  NewReviewThread,
   OpenedPr,
   PrFileContent,
   PrView,
   RefreshResult,
+  ReviewAnchor,
+  ReviewEventName,
   ReviewSummary,
+  ReviewThread,
+  SubmitReviewResult,
   ReviewView,
 } from "./types";
 
@@ -15,6 +20,7 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly body: unknown = null,
   ) {
     super(message);
   }
@@ -28,7 +34,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       body !== null && typeof body === "object" && "error" in body
         ? String(body.error)
         : "";
-    throw new ApiError(response.status, error || response.statusText);
+    throw new ApiError(response.status, error || response.statusText, body);
   }
   return body as T;
 }
@@ -76,6 +82,17 @@ export const api = {
     send<{ path: string; viewed: boolean }>(viewed ? "PUT" : "DELETE", `${reviewPath(reviewId)}/viewed`, {
       path,
     }),
+  reviewThreads: (reviewId: string) => request<ReviewThread[]>(`${reviewPath(reviewId)}/threads`),
+  createReviewThread: (reviewId: string, thread: NewReviewThread) =>
+    post<ReviewThread>(`${reviewPath(reviewId)}/threads`, thread),
+  editReviewThread: (threadId: string, body: string) =>
+    send<ReviewThread>("PATCH", threadPath(threadId), { body }),
+  reanchorReviewThread: (threadId: string, anchor: Omit<ReviewAnchor, "path">) =>
+    send<ReviewThread>("PATCH", threadPath(threadId), anchor),
+  deleteReviewThread: (threadId: string) =>
+    request<unknown>(threadPath(threadId), { method: "DELETE" }),
+  submitReview: (reviewId: string, event: ReviewEventName, body: string) =>
+    post<SubmitReviewResult>(`${reviewPath(reviewId)}/submit-review`, { event, body }),
   closePr: (reviewId: string) => post<{ ok: boolean }>(`${reviewPath(reviewId)}/close`),
 };
 
