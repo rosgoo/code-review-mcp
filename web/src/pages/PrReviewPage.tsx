@@ -1,24 +1,41 @@
+import type { SelectedLineRange } from "@pierre/diffs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AgentPanel } from "../components/AgentPanel";
 import { ChecksSummary } from "../components/ChecksSummary";
 import { CopyButton } from "../components/CopyButton";
 import { DiffStyleToggle } from "../components/DiffStyleToggle";
 import { fileDomId } from "../components/FileViews";
 import { FileTree, type FileDetail } from "../components/FileTree";
 import { Link } from "../components/Link";
-import { Markdown } from "../components/Markdown";
+import { Markdown, type CitationHandler } from "../components/Markdown";
 import {
+  AgentLiveContext,
   PrCommentActionsContext,
   PrCommentStateContext,
   type PrCommentActions,
 } from "../components/PrCommentContext";
-import { PrCommentsPanel } from "../components/PrCommentsPanel";
-import { PrFileCard, type FileLoad } from "../components/PrFileCard";
+import { PrCommentsPanel, type PanelTab } from "../components/PrCommentsPanel";
+import { PrFileCard, type FileLoad, type LineFocus } from "../components/PrFileCard";
 import { OpenProgress, usePrOpener } from "../components/PrOpener";
 import { PrReviewBar } from "../components/PrReviewBar";
-import { reviewThreadDomId } from "../components/ReviewThreads";
 import { StackBar } from "../components/StackBar";
 import { errorMessage } from "../components/Thread";
-import { api } from "../lib/api";
+import {
+  EMPTY_LIVE,
+  applyAgentEvent,
+  applyAgentMessage,
+  composerAnchor,
+  composerFor,
+  isOverview,
+  markSent,
+  questionThreads,
+  statusFrom,
+  withStatus,
+  type AgentLive,
+  type Composer,
+} from "../lib/agent";
+import { ApiError, api } from "../lib/api";
+import type { Citation } from "../lib/citations";
 import { jumpTo } from "../lib/dom";
 import { useDiffStyle, useElapsedSeconds, useReviewEvents } from "../lib/hooks";
 import { prLabel, shellQuote } from "../lib/inbox";
@@ -38,15 +55,20 @@ import {
 import {
   EVENT_LABELS,
   applyThreadEvent,
+  clampSelection,
   countThreads,
   locationLabel,
   pendingThreads,
   placeThreads,
+  reviewThreadDomId,
   threadEventNeedsRefetch,
   threadLocation,
 } from "../lib/review";
 import { navigate, navigationState, reviewPath } from "../lib/router";
+import { readSetting, writeSetting } from "../lib/storage";
 import type {
+  Commentable,
+  ComposerMode,
   PrFile,
   PrStack,
   PrView,
@@ -58,6 +80,8 @@ import type {
 } from "../lib/types";
 
 const HINT_MS = 5000;
+const MODE_KEY = "code-review-mcp:composer-mode";
+const PR_ANCHOR: ReviewAnchor = { path: "", side: "additions", line: 0 };
 
 const sameAnchor = (a: ReviewAnchor | null, b: ReviewAnchor | null) =>
   a !== null &&
@@ -67,6 +91,15 @@ const sameAnchor = (a: ReviewAnchor | null, b: ReviewAnchor | null) =>
   a.line === b.line &&
   a.start_line === b.start_line &&
   a.start_side === b.start_side;
+
+const sameComposer = (a: Composer | null, b: Composer | null) =>
+  a !== null &&
+  b !== null &&
+  a.mode === b.mode &&
+  sameAnchor(a.question, b.question) &&
+  (a.comment === b.comment || sameAnchor(a.comment, b.comment));
+
+type FileFocus = LineFocus & { path: string };
 
 const upsert = (threads: readonly ReviewThread[], thread: ReviewThread) =>
   threads.some((t) => t.id === thread.id)
@@ -151,7 +184,14 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
   const requested = useRef(new Set<string>());
   const elapsed = useElapsedSeconds(busy?.startedAt ?? null);
   const [threads, setThreads] = useState<readonly ReviewThread[]>([]);
-  const [composer, setComposer] = useState<ReviewAnchor | null>(null);
+  const [composer, setComposer] = useState<Composer | null>(null);
+  const [preferredMode, setPreferredMode] = useState<ComposerMode>(() =>
+    readSetting(MODE_KEY) === "question" ? "question" : "comment",
+  );
+  const [live, setLive] = useState<AgentLive>(EMPTY_LIVE);
+  const [panelTab, setPanelTab] = useState<PanelTab>("drafts");
+  const [agentPanelOpen, setAgentPanelOpen] = useState(true);
+  const [focus, setFocus] = useState<FileFocus | null>(null);
   const [reanchoring, setReanchoring] = useState<string | null>(null);
   const [hint, setHint] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState<Submitted | null>(null);
@@ -177,6 +217,15 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
     }
   }, [reviewId]);
 
+  const loadAgent = useCallback(async () => {
+    try {
+      const status = await api.agentStatus(reviewId);
+      setLive((current) => withStatus(current, statusFrom(status)));
+    } catch {
+      // A daemon without the agent has no /agent route; the page then offers no questions.
+    }
+  }, [reviewId]);
+
   const loadStack = useCallback(async () => {
     try {
       setStack(await api.reviewStack(reviewId));
@@ -189,7 +238,8 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
     void loadPr();
     void loadThreads();
     void loadStack();
-  }, [loadPr, loadThreads, loadStack]);
+    void loadAgent();
+  }, [loadPr, loadThreads, loadStack, loadAgent]);
 
   const openPr = opener.open;
   const goToStackPr = useCallback(
@@ -210,12 +260,32 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
 
   useReviewEvents(reviewId, (event) => {
     if (event.type === "head_moved") setLatestMove(event);
-    else if (event.type === "connected") void loadThreads();
-    else if (event.type === "review_closed") void loadPr();
+    else if (event.type === "connected") {
+      void loadThreads();
+      void loadAgent();
+    } else if (event.type === "review_closed") void loadPr();
     else if (event.type === "view_updated") {
+      // Deltas sent while the stream was down are lost, so drop the partial answers.
+      setLive((current) => ({ ...current, streams: {} }));
       void loadPr();
       void loadThreads();
       void loadStack();
+      void loadAgent();
+    } else if (
+      event.type === "agent_status" ||
+      event.type === "agent_delta" ||
+      event.type === "agent_error"
+    ) {
+      setLive((current) => applyAgentEvent(current, event));
+    } else if (event.type === "agent_message") {
+      setLive((current) => applyAgentEvent(current, event));
+      if (threadsByIdRef.current.has(event.thread_id)) {
+        setThreads(
+          (current) => applyAgentMessage(current, event.thread_id, event.message) ?? current,
+        );
+      } else {
+        void loadThreads();
+      }
     } else if (event.type === "review_submitted") {
       void loadPr();
       void loadThreads();
@@ -339,11 +409,39 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
 
   const threadsById = useMemo(() => new Map(threads.map((t) => [t.id, t])), [threads]);
 
-  const commentActions = useMemo<PrCommentActions>(
-    () => ({
-      openComposer(anchor) {
-        setComposer((current) => (sameAnchor(current, anchor) ? current : anchor));
-        if (anchor !== null) setReanchoring(null);
+  const agentOn = live.status !== null && live.status.state !== "off";
+
+  const commentActions = useMemo<PrCommentActions>(() => {
+    const reply = async (threadId: string, body: string) => {
+      const result = await api.reply(threadId, body);
+      setLive((current) => markSent(current, threadId));
+      const message = {
+        id: result.id,
+        author: "user" as const,
+        body,
+        created_at: new Date().toISOString(),
+      };
+      setThreads((current) =>
+        current.map((t) =>
+          t.id === threadId && !t.messages.some((m) => m.id === result.id)
+            ? { ...t, messages: [...t.messages, message] }
+            : t,
+        ),
+      );
+    };
+    return {
+      openComposer(next) {
+        setComposer((current) => (sameComposer(current, next) ? current : next));
+        if (next !== null) setReanchoring(null);
+      },
+      setComposerMode(mode) {
+        setPreferredMode(mode);
+        writeSetting(MODE_KEY, mode);
+        setComposer((current) =>
+          current === null || (mode === "comment" && current.comment === null)
+            ? current
+            : { ...current, mode },
+        );
       },
       async addComment(anchor, body) {
         const thread = await api.createReviewThread(reviewId, {
@@ -352,7 +450,31 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
           body,
         });
         setThreads((current) => upsert(current, thread));
-        setComposer((current) => (sameAnchor(current, anchor) ? null : current));
+        setComposer((current) =>
+          current !== null && sameAnchor(composerAnchor(current), anchor) ? null : current,
+        );
+      },
+      async askQuestion(anchor, body) {
+        const thread = await api.createReviewThread(reviewId, { kind: "question", ...anchor, body });
+        setThreads((current) => upsert(current, thread));
+        setLive((current) => markSent(current, thread.id));
+        setComposer((current) =>
+          current !== null && sameAnchor(composerAnchor(current), anchor) ? null : current,
+        );
+      },
+      reply,
+      async stop(threadId) {
+        try {
+          await api.stopThread(threadId);
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 409) showHint("The answer already finished.");
+          else throw e;
+        }
+      },
+      async retry(thread) {
+        const last = thread.messages.findLast((m) => m.author === "user");
+        if (last === undefined) throw new Error("This thread has no question to send again.");
+        await reply(thread.id, last.body);
       },
       async editComment(threadId, body) {
         const thread = await api.editReviewThread(threadId, body);
@@ -367,20 +489,35 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
         setReanchoring(threadId);
         if (threadId !== null) setComposer(null);
       },
-      pickLines(path, result) {
+      pickLines(path: string, range: SelectedLineRange, commentable: Commentable | undefined) {
+        const moving = reanchoringRef.current;
+        if (moving === null) {
+          const result = composerFor(
+            path,
+            range,
+            commentable,
+            preferredModeRef.current,
+            agentOnRef.current,
+          );
+          if (!result.ok) {
+            showHint(result.hint);
+            return;
+          }
+          const next = result.composer;
+          setComposer((current) => (sameComposer(current, next) ? current : next));
+          if (next.mode === "comment" && next.clamped && next.comment !== null) {
+            showHint(
+              `The selection was trimmed to ${locationLabel(next.comment)}, the part inside the diff.`,
+            );
+          }
+          return;
+        }
+        const result = clampSelection(path, range, commentable);
         if (!result.ok) {
           showHint(result.hint);
           return;
         }
         const { anchor } = result;
-        const moving = reanchoringRef.current;
-        if (moving === null) {
-          setComposer((current) => (sameAnchor(current, anchor) ? current : anchor));
-          if (result.clamped) {
-            showHint(`The selection was trimmed to ${locationLabel(anchor)}, the part inside the diff.`);
-          }
-          return;
-        }
         const thread = threadsByIdRef.current.get(moving);
         if (thread === undefined) {
           setReanchoring(null);
@@ -400,22 +537,64 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
           (e: unknown) => showHint(`Could not move the comment: ${errorMessage(e)}`),
         );
       },
-    }),
-    [reviewId, showHint],
-  );
+      openCitation(citation: Citation) {
+        const file = filesRef.current.find((f) => f.path === citation.path);
+        if (file === undefined) return;
+        setOverrides((current) => new Map(current).set(file.path, false));
+        setFocus({
+          path: file.path,
+          start: citation.start,
+          end: citation.end,
+          side: file.status === "deleted" ? "deletions" : "additions",
+          nonce: Date.now(),
+        });
+        window.requestAnimationFrame(() => jumpTo(fileDomId(file.path), "start"));
+      },
+    };
+  }, [reviewId, showHint]);
   const threadsByIdRef = useRef(threadsById);
   const reanchoringRef = useRef(reanchoring);
+  const preferredModeRef = useRef(preferredMode);
+  const agentOnRef = useRef(agentOn);
   useEffect(() => {
     threadsByIdRef.current = threadsById;
     reanchoringRef.current = reanchoring;
-  }, [threadsById, reanchoring]);
-  const commentState = useMemo(
-    () => ({ threadsById, composer, reanchoring }),
-    [threadsById, composer, reanchoring],
-  );
+    preferredModeRef.current = preferredMode;
+    agentOnRef.current = agentOn;
+  }, [threadsById, reanchoring, preferredMode, agentOn]);
 
   const files = useMemo(() => pr?.files ?? [], [pr]);
   const paths = useMemo(() => files.map((f) => f.path), [files]);
+  const filesRef = useRef(files);
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+  const citations = useMemo<CitationHandler>(() => {
+    const known = new Set(paths);
+    return { inPr: (path) => known.has(path), open: (c) => commentActions.openCitation(c) };
+  }, [paths, commentActions]);
+  const commentState = useMemo(
+    () => ({ threadsById, composer, reanchoring, agentOn, citations }),
+    [threadsById, composer, reanchoring, agentOn, citations],
+  );
+  const clearFocus = useCallback(() => setFocus(null), []);
+  const overview = useMemo(
+    () => threads.find((t) => isOverview(t, live.status)) ?? null,
+    [threads, live.status],
+  );
+  const questions = useMemo(
+    () => questionThreads(threads, paths, live.status),
+    [threads, paths, live.status],
+  );
+  const prQuestions = useMemo(() => questions.filter((t) => t.path === ""), [questions]);
+  const warmup = useCallback(async () => {
+    const status = await api.startWarmup(reviewId);
+    setLive((current) => withStatus(current, statusFrom(status)));
+  }, [reviewId]);
+  const askAboutPr = useCallback(
+    (body: string) => commentActions.askQuestion(PR_ANCHOR, body),
+    [commentActions],
+  );
   const counts = useMemo(
     () =>
       new Map<string, ChangeCounts>(
@@ -440,7 +619,8 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
   const commenting = pr !== null && pr.status !== "closed";
 
   const jumpToThread = useCallback((thread: ReviewThread) => {
-    setOverrides((current) => new Map(current).set(thread.path, false));
+    if (thread.path === "") setAgentPanelOpen(true);
+    else setOverrides((current) => new Map(current).set(thread.path, false));
     window.requestAnimationFrame(() =>
       window.requestAnimationFrame(() => {
         const id = document.getElementById(reviewThreadDomId(thread.id))
@@ -515,6 +695,9 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
         placed={placed.get(file.path)}
         composer={composer !== null && composer.path === file.path ? composer : null}
         commenting={commenting}
+        agentOn={agentOn}
+        focus={focus !== null && focus.path === file.path ? focus : null}
+        onFocused={clearFocus}
         onLoad={onLoad}
         onToggleCollapsed={onToggleCollapsed}
         onToggleViewed={onToggleViewed}
@@ -525,6 +708,7 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
   return (
     <PrCommentActionsContext.Provider value={commentActions}>
     <PrCommentStateContext.Provider value={commentState}>
+    <AgentLiveContext.Provider value={live}>
     <div className={commenting ? "pr-page with-review-bar" : "pr-page"}>
       <header className="topbar">
         <button
@@ -570,6 +754,12 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
               onClick={() => setPanelOpen(!panelOpen)}
             >
               Drafts <span className="count">{draftCount + staleCount}</span>
+              {live.status !== null && (
+                <>
+                  {" "}
+                  Questions <span className="count">{questions.length}</span>
+                </>
+              )}
             </button>
             <button
               type="button"
@@ -713,6 +903,16 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
           />
         )}
         <main className="review-main" ref={setScrollRoot}>
+          {pr && commenting && (
+            <AgentPanel
+              open={agentPanelOpen}
+              overview={overview}
+              questions={prQuestions}
+              onToggle={() => setAgentPanelOpen(!agentPanelOpen)}
+              onWarmup={warmup}
+              onAsk={askAboutPr}
+            />
+          )}
           {pr && pr.status !== "closed" && files.length > 0 && (
             <div className="pr-summary muted">
               {files.length} files · {viewedCount} viewed
@@ -729,7 +929,10 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
       </div>
       {panelOpen && commenting && (
         <PrCommentsPanel
-          threads={pending}
+          tab={panelTab}
+          drafts={pending}
+          questions={questions}
+          onTab={setPanelTab}
           onJump={jumpToThread}
           onClose={() => setPanelOpen(false)}
         />
@@ -745,6 +948,7 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
         />
       )}
     </div>
+    </AgentLiveContext.Provider>
     </PrCommentStateContext.Provider>
     </PrCommentActionsContext.Provider>
   );

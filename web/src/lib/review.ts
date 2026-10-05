@@ -80,12 +80,19 @@ export function clampSelection(
   return { ok: true, anchor, clamped };
 }
 
+export const reviewThreadDomId = (threadId: string) => `review-thread-${threadId}`;
+
 export const isReviewComment = (thread: ReviewThread) => thread.kind === "review_comment";
 
-/** A thread shows on its line when it is a draft or posted comment anchored at the shown head. */
+/**
+ * A thread shows on its line when it is anchored at the shown head and is a draft or
+ * posted comment, or a question to the agent.
+ */
 export function showsInline(thread: ReviewThread, headSha: string | null): boolean {
+  const shownKind =
+    thread.kind === "question" || thread.status === "draft" || thread.status === "posted";
   return (
-    (thread.status === "draft" || thread.status === "posted") &&
+    shownKind &&
     thread.line > 0 &&
     (thread.anchor_sha === null || headSha === null || thread.anchor_sha === headSha)
   );
@@ -93,17 +100,19 @@ export function showsInline(thread: ReviewThread, headSha: string | null): boole
 
 export interface PlacedThreads {
   inline: ReviewThread[];
-  /** File-level comments, stale drafts, and posted comments from an older head. */
+  /** File-level threads, stale drafts, and threads from an older head. */
   block: ReviewThread[];
 }
 
+/** Review comments and questions by file. Questions about the whole PR (path "") are left out. */
 export function placeThreads(
   threads: readonly ReviewThread[],
   headSha: string | null,
 ): Map<string, PlacedThreads> {
   const byPath = new Map<string, PlacedThreads>();
   for (const thread of threads) {
-    if (!isReviewComment(thread)) continue;
+    const placeable = isReviewComment(thread) || (thread.kind === "question" && thread.path !== "");
+    if (!placeable) continue;
     const placed = byPath.get(thread.path) ?? { inline: [], block: [] };
     (showsInline(thread, headSha) ? placed.inline : placed.block).push(thread);
     byPath.set(thread.path, placed);

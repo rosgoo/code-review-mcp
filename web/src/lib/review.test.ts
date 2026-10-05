@@ -144,14 +144,16 @@ describe("thread placement", () => {
     thread("stale", { status: "stale", anchor_sha: "head0" }),
     thread("file", { line: 0 }),
     thread("other", { path: "b.py", side: "deletions", line: 9 }),
-    thread("question", { kind: "question" }),
+    thread("question", { kind: "question", status: "submitted" }),
+    thread("pr-question", { kind: "question", status: "submitted", path: "", line: 0 }),
   ];
 
-  it("puts current drafts and posted comments inline and the rest in the file block", () => {
+  it("puts current drafts, posted comments, and questions inline and the rest in the file block", () => {
     const placed = placeThreads(threads, "head1");
-    expect(placed.get("app.py")?.inline.map((t) => t.id)).toEqual(["draft", "posted"]);
+    expect(placed.get("app.py")?.inline.map((t) => t.id)).toEqual(["draft", "posted", "question"]);
     expect(placed.get("app.py")?.block.map((t) => t.id)).toEqual(["old-posted", "stale", "file"]);
     expect(placed.get("b.py")?.inline.map((t) => t.id)).toEqual(["other"]);
+    expect(placed.has("")).toBe(false);
   });
 
   it("groups inline threads and the composer by side and line", () => {
@@ -160,7 +162,7 @@ describe("thread placement", () => {
       {
         side: "additions",
         lineNumber: 12,
-        metadata: { threadIds: ["draft", "posted"], composer: false },
+        metadata: { threadIds: ["draft", "posted", "question"], composer: false },
       },
       { side: "deletions", lineNumber: 9, metadata: { threadIds: [], composer: true } },
     ]);

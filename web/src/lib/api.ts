@@ -1,4 +1,5 @@
 import type {
+  AgentStatus,
   Comment,
   InboxList,
   InboxName,
@@ -93,6 +94,9 @@ export const api = {
     send<ReviewThread>("PATCH", threadPath(threadId), anchor),
   deleteReviewThread: (threadId: string) =>
     request<unknown>(threadPath(threadId), { method: "DELETE" }),
+  agentStatus: (reviewId: string) => request<AgentStatus>(`${reviewPath(reviewId)}/agent`),
+  startWarmup: (reviewId: string) => post<AgentStatus>(`${reviewPath(reviewId)}/agent/warmup`),
+  stopThread: (threadId: string) => post<{ ok: boolean }>(`${threadPath(threadId)}/stop`),
   submitReview: (reviewId: string, event: ReviewEventName, body: string) =>
     post<SubmitReviewResult>(`${reviewPath(reviewId)}/submit-review`, { event, body }),
   closePr: (reviewId: string) => post<{ ok: boolean }>(`${reviewPath(reviewId)}/close`),

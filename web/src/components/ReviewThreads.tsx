@@ -1,13 +1,13 @@
 import { useState } from "react";
+import { composerAnchor, type Composer } from "../lib/agent";
 import type { AnnotationData } from "../lib/annotations";
-import { locationLabel, threadLocation } from "../lib/review";
-import type { ReviewAnchor, ReviewThread } from "../lib/types";
+import { locationLabel, reviewThreadDomId, threadLocation } from "../lib/review";
+import type { ComposerMode, ReviewThread } from "../lib/types";
 import { Markdown } from "./Markdown";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { usePrCommentActions, usePrCommentState } from "./PrCommentContext";
+import { QuestionThreadCard } from "./QuestionThread";
 import { StatusBadge, errorMessage } from "./Thread";
-
-export const reviewThreadDomId = (threadId: string) => `review-thread-${threadId}`;
 
 export function ReviewThreadCard({ thread }: { thread: ReviewThread }) {
   const actions = usePrCommentActions();
@@ -34,7 +34,11 @@ export function ReviewThreadCard({ thread }: { thread: ReviewThread }) {
       <header className="thread-header">
         <StatusBadge status={thread.status} />
         <span className="thread-location">{threadLocation(thread)}</span>
-        {thread.created_by === "agent" && <span className="tag">by agent</span>}
+        {thread.created_by === "agent" && (
+          <span className="tag tag-agent" title="The review agent drafted this comment">
+            Drafted by agent
+          </span>
+        )}
         <span className="spacer" />
         {thread.status === "draft" && !editing && (
           <>
@@ -100,21 +104,68 @@ export function ReviewThreadCard({ thread }: { thread: ReviewThread }) {
   );
 }
 
-export function ReviewComposerCard({ anchor }: { anchor: ReviewAnchor }) {
+const OUTSIDE_DIFF_TITLE = "Review comments go on lines inside the diff";
+
+function ModeToggle({ composer }: { composer: Composer }) {
   const actions = usePrCommentActions();
+  const { agentOn } = usePrCommentState();
+  const option = (mode: ComposerMode, label: string, disabledReason: string | null) => (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={composer.mode === mode}
+      className={composer.mode === mode ? `active mode-${mode}` : `mode-${mode}`}
+      disabled={disabledReason !== null}
+      title={disabledReason ?? undefined}
+      onClick={() => actions.setComposerMode(mode)}
+    >
+      {label}
+    </button>
+  );
   return (
-    <div className="composer review-composer">
+    <div className="segmented mode-toggle" role="radiogroup" aria-label="What to write">
+      {option("comment", "Review comment", composer.comment === null ? OUTSIDE_DIFF_TITLE : null)}
+      {option("question", "Ask agent", agentOn ? null : "The review agent is off")}
+    </div>
+  );
+}
+
+export function ReviewComposerCard({ composer }: { composer: Composer }) {
+  const actions = usePrCommentActions();
+  const anchor = composerAnchor(composer);
+  const asking = composer.mode === "question";
+  const where = anchor.line === 0 ? `${anchor.path} (file)` : locationLabel(anchor);
+  return (
+    <div className={asking ? "composer review-composer composer-question" : "composer review-composer"}>
       <div className="composer-label">
-        Draft review comment · {locationLabel(anchor)}
-        {anchor.side === "deletions" && anchor.line > 0 && " · old side"}
+        <ModeToggle composer={composer} />
+        <span>
+          {asking ? "Ask agent" : "Draft review comment"} · {where}
+          {anchor.side === "deletions" && anchor.line > 0 && " · old side"}
+        </span>
       </div>
+      {asking && (
+        <p className="composer-note">
+          Private: only you see this. The agent answers here and posts nothing to GitHub.
+        </p>
+      )}
       <MarkdownEditor
-        placeholder="Leave a review comment for the author"
-        submitLabel="Add draft"
-        onSubmit={(body) => actions.addComment(anchor, body)}
+        placeholder={asking ? "Ask the agent about this code" : "Leave a review comment for the author"}
+        submitLabel={asking ? "Ask" : "Add draft"}
+        onSubmit={(body) =>
+          asking ? actions.askQuestion(anchor, body) : actions.addComment(anchor, body)
+        }
         onCancel={() => actions.openComposer(null)}
       />
     </div>
+  );
+}
+
+function AnyThreadCard({ thread }: { thread: ReviewThread }) {
+  return thread.kind === "question" ? (
+    <QuestionThreadCard thread={thread} />
+  ) : (
+    <ReviewThreadCard thread={thread} />
   );
 }
 
@@ -125,29 +176,29 @@ export function ReviewAnnotation({ data }: { data: AnnotationData | undefined })
   return (
     <div className="annotation">
       {threads.map((thread) => (
-        <ReviewThreadCard key={thread.id} thread={thread} />
+        <AnyThreadCard key={thread.id} thread={thread} />
       ))}
-      {data.composer && composer && <ReviewComposerCard anchor={composer} />}
+      {data.composer && composer && <ReviewComposerCard composer={composer} />}
     </div>
   );
 }
 
-/** File-level comments, stale drafts, and outdated posted comments, above the diff. */
+/** File-level threads, stale drafts, outdated comments, and threads on hidden lines, above the diff. */
 export function FileThreadsBlock({
   threads,
   composer,
 }: {
   threads: readonly ReviewThread[];
-  composer: ReviewAnchor | null;
+  composer: Composer | null;
 }) {
-  const fileComposer = composer !== null && composer.line === 0 ? composer : null;
+  const fileComposer = composer !== null && composerAnchor(composer).line === 0 ? composer : null;
   if (threads.length === 0 && fileComposer === null) return null;
   return (
     <div className="file-threads">
       {threads.map((thread) => (
-        <ReviewThreadCard key={thread.id} thread={thread} />
+        <AnyThreadCard key={thread.id} thread={thread} />
       ))}
-      {fileComposer && <ReviewComposerCard anchor={fileComposer} />}
+      {fileComposer && <ReviewComposerCard composer={fileComposer} />}
     </div>
   );
 }

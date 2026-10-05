@@ -96,7 +96,11 @@ export type ReviewEvent =
   | { type: "thread_added"; thread?: ReviewThread }
   | { type: "thread_updated"; thread?: ReviewThread }
   | { type: "threads_stale"; thread_ids: string[] }
-  | { type: "review_submitted"; html_url?: string; event?: ReviewEventName; posted?: number };
+  | { type: "review_submitted"; html_url?: string; event?: ReviewEventName; posted?: number }
+  | ({ type: "agent_status" } & AgentStatus)
+  | { type: "agent_delta"; thread_id: string; text: string }
+  | { type: "agent_message"; thread_id: string; message: ThreadMessage }
+  | { type: "agent_error"; thread_id: string; error: string };
 
 export interface InboxItem {
   repo: string;
@@ -226,8 +230,25 @@ export interface ReviewAnchor {
 }
 
 export interface NewReviewThread extends ReviewAnchor {
-  kind: "review_comment";
+  kind: "review_comment" | "question";
   body: string;
+}
+
+export type ComposerMode = "comment" | "question";
+
+export type AgentState = "idle" | "queued" | "running" | "error" | "off";
+export type WarmupStatus = "none" | "running" | "done" | "error";
+
+export interface AgentStatus {
+  state: AgentState;
+  session_id: string | null;
+  model: string | null;
+  cost_usd: number | null;
+  context_tokens: number | null;
+  /** Thread ids waiting for a turn, oldest first. */
+  queue: string[];
+  running_thread_id: string | null;
+  warmup: { status: WarmupStatus; thread_id: string | null };
 }
 
 export interface SubmitReviewResult {
