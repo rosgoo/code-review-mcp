@@ -195,11 +195,15 @@ export interface Viewer {
   is_author: boolean;
 }
 
+export type MessageStatus = "staged" | "sent";
+
 export interface ThreadMessage {
   id: string;
   author: "user" | "agent";
   body: string;
   created_at: string;
+  /** A staged question waits for the next send to the agent; absent means sent. */
+  status?: MessageStatus;
 }
 
 export interface ReviewThread {
@@ -218,6 +222,8 @@ export interface ReviewThread {
   updated_at: string;
   github_url: string | null;
   messages: ThreadMessage[];
+  /** Why the agent did not answer the last send of a question; null once it answers. */
+  agent_error?: string | null;
 }
 
 export interface ReviewAnchor {
@@ -239,16 +245,37 @@ export type ComposerMode = "comment" | "question";
 export type AgentState = "idle" | "queued" | "running" | "error" | "off";
 export type WarmupStatus = "none" | "running" | "done" | "error";
 
+export type AgentBatchState = "queued" | "running" | "done" | "stopped" | "error";
+
+/** One send to the agent: the questions it carries and the ones answered so far. */
+export interface AgentBatch {
+  id: string;
+  thread_ids: string[];
+  answered_ids: string[];
+  state: AgentBatchState;
+}
+
+/** The answer text written so far for the thread the agent is answering. */
+export interface AgentPartial {
+  thread_id: string;
+  text: string;
+}
+
 export interface AgentStatus {
   state: AgentState;
   session_id: string | null;
   model: string | null;
   cost_usd: number | null;
   context_tokens: number | null;
-  /** Thread ids waiting for a turn, oldest first. */
-  queue: string[];
-  running_thread_id: string | null;
+  staged_count: number;
+  batch: AgentBatch | null;
+  partial: AgentPartial | null;
   warmup: { status: WarmupStatus; thread_id: string | null };
+}
+
+export interface SentBatch {
+  batch_id: string;
+  thread_ids: string[];
 }
 
 export interface SubmitReviewResult {

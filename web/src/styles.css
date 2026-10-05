@@ -1851,14 +1851,11 @@ kbd {
   white-space: nowrap;
 }
 
-.chip-running,
 .chip-agent-running {
   background: var(--agent);
   color: var(--agent-text);
 }
 
-.chip-queued,
-.chip-sent,
 .chip-agent-queued {
   background: var(--agent-bg);
   color: var(--agent);
@@ -2118,4 +2115,139 @@ a.citation {
 
 .panel-item-question .panel-item-header .chip {
   margin-left: auto;
+}
+
+/* Staged questions and the agent bar */
+
+.pr-footer {
+  display: flex;
+  flex-direction: column;
+}
+
+.with-agent-bar .pr-comments-panel {
+  bottom: 110px;
+}
+
+.agent-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  border-top: 1px solid var(--border);
+  border-left: 3px solid var(--agent);
+  background: var(--agent-bg);
+  font-size: 13px;
+}
+
+.agent-bar-title {
+  color: var(--agent);
+  font-weight: 700;
+}
+
+.agent-bar-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--agent);
+  font-weight: 600;
+}
+
+.agent-bar progress {
+  width: 120px;
+  height: 6px;
+  accent-color: var(--agent);
+}
+
+.pill-staged {
+  background: var(--agent);
+  color: var(--agent-text);
+}
+
+.agent-bar .pill {
+  border: 0;
+  cursor: pointer;
+}
+
+.agent-send:not(:disabled) {
+  border-color: var(--agent);
+  background: var(--agent);
+  color: var(--agent-text);
+  font-weight: 600;
+}
+
+.badge-staged {
+  margin-left: 6px;
+  background: var(--agent);
+  color: var(--agent-text);
+}
+
+.message-staged {
+  padding: 6px 10px;
+  border: 1px dashed var(--agent);
+  border-radius: 6px;
+}
+
+.message-actions {
+  display: inline-flex;
+  gap: 8px;
+  margin-left: 10px;
+  font-weight: 400;
+}
+
+.message-author {
+  display: flex;
+  align-items: center;
+}
+
+.agent-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  color: var(--agent);
+  font-size: 13px;
+}
+
+.chip-staged {
+  background: var(--agent);
+  color: var(--agent-text);
+}
+
+.chip-streaming {
+  background: var(--agent);
+  color: var(--agent-text);
+}
+
+.chip-waiting {
+  background: var(--agent-bg);
+  color: var(--agent);
+}
+
+.panel-section + .panel-section {
+  margin-top: 12px;
+}
+
+.panel-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.panel-staged-note {
+  font-size: 12px;
+}
+
+.agent-send:hover:not(:disabled),
+.ask-button:hover:not(:disabled) {
+  border-color: var(--agent);
+  background: var(--agent);
+  color: var(--agent-text);
+  filter: brightness(1.08);
 }

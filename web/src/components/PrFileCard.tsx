@@ -191,6 +191,9 @@ export interface LineFocus {
 }
 
 const FOCUS_FRAMES = 30;
+/** How long a citation's lines stay selected. The diff pins the + to a selection, so a
+ * selection kept longer would stop the + from following the pointer. */
+const FOCUS_HOLD_MS = 2500;
 
 function FileDiffView({
   path,
@@ -250,10 +253,14 @@ function FileDiffView({
     setDragRange(range);
   });
   // A citation selects its lines the same way, then scrolls the first one into view. Lines
-  // outside the hunks need the unchanged lines expanded first.
+  // outside the hunks need the unchanged lines expanded first. The selection clears after
+  // FOCUS_HOLD_MS unless the user picked lines or opened a composer here meanwhile.
   const [focusRange, setFocusRange] = useState<SelectedLineRange | null>(null);
   const focusing = useRef(false);
   const handledFocus = useRef<number | null>(null);
+  const pickCount = useRef(0);
+  const holdTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(holdTimer.current), []);
   useEffect(() => {
     if (focus === null || handledFocus.current === focus.nonce) return;
     handledFocus.current = focus.nonce;
@@ -278,12 +285,20 @@ function FileDiffView({
       (line ?? wrapper.current)?.scrollIntoView({ behavior: "smooth", block: "center" });
       setFocusRange(null);
       onFocused();
+      const picksAtFocus = pickCount.current;
+      window.clearTimeout(holdTimer.current);
+      holdTimer.current = window.setTimeout(() => {
+        if (pickCount.current === picksAtFocus && previousComposer.current === null) {
+          setClearSelection(true);
+        }
+      }, FOCUS_HOLD_MS);
     };
     frame = requestAnimationFrame(reveal);
     return () => cancelAnimationFrame(frame);
   }, [focusRange, onFocused]);
   const onRange = useStableCallback((range: SelectedLineRange) => {
     actions.pickLines(path, range, content.commentable);
+    pickCount.current += 1;
     awaitingPick.current = true;
     setPicks((count) => count + 1);
   });
@@ -373,6 +388,13 @@ function FileBody({
   const [expandAll, setExpandAll] = useState(false);
   const onExpandAll = useCallback(() => setExpandAll(true), []);
   const commentable = load?.state === "loaded" ? load.content.commentable : undefined;
+  // A composer on a line outside the hunks means the user expanded unchanged lines to pick
+  // it. Keep them all expanded, so the thread written there stays at its line.
+  useEffect(() => {
+    if (composer === null || commentable === undefined) return;
+    const anchor = composerAnchor(composer);
+    if (anchor.line > 0 && !inHunks(commentable, anchor.side, anchor.line)) setExpandAll(true);
+  }, [composer, commentable]);
   const { shown, hidden } = useMemo(() => {
     const inline = placed?.inline ?? NO_THREADS;
     return expandAll ? { shown: [...inline], hidden: [] } : splitByHunks(inline, commentable);

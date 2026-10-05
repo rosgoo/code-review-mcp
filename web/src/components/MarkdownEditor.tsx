@@ -7,15 +7,21 @@ interface MarkdownEditorProps {
   placeholder: string;
   submitLabel: string;
   onSubmit(text: string): Promise<void>;
+  /** A second way to submit, shown before the main button. */
+  secondary?: { label: string; onSubmit(text: string): Promise<void> };
   onCancel(): void;
 }
 
-/** A textarea with Write and Preview tabs. ⌘/Ctrl+Enter submits and Escape cancels. */
+/**
+ * A textarea with Write and Preview tabs. ⌘/Ctrl+Enter submits with the main action and
+ * Escape cancels.
+ */
 export function MarkdownEditor({
   initial = "",
   placeholder,
   submitLabel,
   onSubmit,
+  secondary,
   onCancel,
 }: MarkdownEditorProps) {
   const [text, setText] = useState(initial);
@@ -23,13 +29,13 @@ export function MarkdownEditor({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function submit() {
+  async function submit(action: (text: string) => Promise<void> = onSubmit) {
     const body = text.trim();
     if (!body || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await onSubmit(body);
+      await action(body);
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -83,6 +89,16 @@ export function MarkdownEditor({
         <button type="button" className="button" onClick={onCancel} disabled={busy}>
           Cancel
         </button>
+        {secondary && (
+          <button
+            type="button"
+            className="button"
+            onClick={() => void submit(secondary.onSubmit)}
+            disabled={busy || !text.trim()}
+          >
+            {secondary.label}
+          </button>
+        )}
         <button
           type="button"
           className="button primary"

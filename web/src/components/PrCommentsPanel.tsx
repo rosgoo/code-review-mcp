@@ -1,9 +1,10 @@
-import { questionLocation, questionState } from "../lib/agent";
+import { useState } from "react";
+import { questionLocation, questionState, stagedMessages } from "../lib/agent";
 import { previewBody, threadLocation } from "../lib/review";
 import type { ReviewThread } from "../lib/types";
-import { useAgentLive } from "./PrCommentContext";
+import { useAgentLive, usePrCommentActions, usePrCommentState } from "./PrCommentContext";
 import { QuestionStateChip } from "./QuestionThread";
-import { StatusBadge } from "./Thread";
+import { StatusBadge, errorMessage } from "./Thread";
 
 export type PanelTab = "drafts" | "questions";
 
@@ -27,6 +28,7 @@ function QuestionItem({
   const state = questionState(thread, live);
   const last = thread.messages.at(-1);
   const preview = live.streams[thread.id] ?? last?.body ?? "";
+  const staged = stagedMessages(thread).length;
   return (
     <button
       type="button"
@@ -39,6 +41,7 @@ function QuestionItem({
         <span className="spacer" />
         <QuestionStateChip state={state} />
       </span>
+      {staged > 1 && <span className="muted panel-staged-note">{staged} staged messages</span>}
       <span className="panel-preview">
         {last?.author === "agent" || live.streams[thread.id] ? "Agent: " : "You: "}
         {previewBody(preview)}
@@ -107,16 +110,77 @@ export function PrCommentsPanel({
               <span className="panel-preview">{previewBody(thread.messages[0]?.body ?? "")}</span>
             </button>
           ))}
-        {tab === "questions" && questions.length === 0 && (
-          <p className="muted panel-empty">
-            No questions. Ask the agent from a line, a file header, or the agent panel.
-          </p>
-        )}
-        {tab === "questions" &&
-          questions.map((thread) => (
-            <QuestionItem key={thread.id} thread={thread} onJump={onJump} />
-          ))}
+        {tab === "questions" && <QuestionsTab questions={questions} onJump={onJump} />}
       </div>
     </aside>
+  );
+}
+
+function QuestionsTab({
+  questions,
+  onJump,
+}: {
+  questions: readonly ReviewThread[];
+  onJump(thread: ReviewThread): void;
+}) {
+  const actions = usePrCommentActions();
+  const { agentOn } = usePrCommentState();
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const staged = questions.filter((t) => stagedMessages(t).length > 0);
+  const rest = questions.filter((t) => stagedMessages(t).length === 0);
+  if (questions.length === 0) {
+    return (
+      <p className="muted panel-empty">
+        No questions. Ask the agent from a line, a file header, or the agent panel.
+      </p>
+    );
+  }
+
+  async function send() {
+    setBusy(true);
+    setError(null);
+    try {
+      await actions.send();
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      {staged.length > 0 && (
+        <div className="panel-section">
+          <div className="panel-section-header">
+            <span>Staged</span>
+            <span className="spacer" />
+            <button
+              type="button"
+              className="button button-small agent-send"
+              disabled={busy || !agentOn}
+              onClick={() => void send()}
+            >
+              Send to agent
+            </button>
+          </div>
+          {error && <p className="form-error">{error}</p>}
+          {staged.map((thread) => (
+            <QuestionItem key={thread.id} thread={thread} onJump={onJump} />
+          ))}
+        </div>
+      )}
+      {rest.length > 0 && (
+        <div className="panel-section">
+          <div className="panel-section-header">
+            <span>Asked</span>
+          </div>
+          {rest.map((thread) => (
+            <QuestionItem key={thread.id} thread={thread} onJump={onJump} />
+          ))}
+        </div>
+      )}
+    </>
   );
 }

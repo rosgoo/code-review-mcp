@@ -1,6 +1,7 @@
 import type { SelectedLineRange } from "@pierre/diffs";
 import { OUTSIDE_DIFF_HINT, clampSelection } from "./review";
 import type {
+  AgentBatchState,
   AgentStatus,
   Commentable,
   ComposerMode,
@@ -12,14 +13,14 @@ import type {
   ThreadMessage,
 } from "./types";
 
-/** What the page knows about the agent beyond the threads: its status and turns in flight. */
+/** What the page knows about the agent beyond the threads: its status and answers in flight. */
 export interface AgentLive {
   status: AgentStatus | null;
   /** Answer text streamed so far, by thread id, until the final message arrives. */
   streams: Readonly<Record<string, string>>;
-  /** The last turn error, by thread id, until the thread gets a new turn. */
+  /** Why the agent did not answer a thread, by thread id, until the thread is sent again. */
   errors: Readonly<Record<string, string>>;
-  /** Threads sent to the agent that the status has not listed yet. */
+  /** Threads sent to the agent that no status lists in a batch yet. */
   sent: Readonly<Record<string, true>>;
 }
 
@@ -31,37 +32,94 @@ const without = <T>(record: Readonly<Record<string, T>>, key: string): Record<st
   return rest;
 };
 
+const TERMINAL_BATCH_STATES: ReadonlySet<AgentBatchState> = new Set(["done", "stopped", "error"]);
+
+/** True while a batch is out with the agent: queued or running. */
+export const batchActive = (status: AgentStatus | null) =>
+  status !== null && status.batch !== null && !TERMINAL_BATCH_STATES.has(status.batch.state);
+
+/** True when the batch out with the agent carries `threadId` and has not answered it yet. */
+function awaitingAnswer(status: AgentStatus | null, threadId: string): boolean {
+  const batch = status?.batch ?? null;
+  return (
+    batch !== null &&
+    !TERMINAL_BATCH_STATES.has(batch.state) &&
+    batch.thread_ids.includes(threadId) &&
+    !batch.answered_ids.includes(threadId)
+  );
+}
+
+/** True when `threadId` is the overview the warm-up is writing now. */
+const warmingUp = (status: AgentStatus, threadId: string) =>
+  status.warmup.status === "running" && status.warmup.thread_id === threadId;
+
 export function statusFrom(event: AgentStatus): AgentStatus {
+  const batch = event.batch ?? null;
+  const partial = event.partial ?? null;
   return {
     state: event.state,
     session_id: event.session_id ?? null,
     model: event.model ?? null,
     cost_usd: event.cost_usd ?? null,
     context_tokens: event.context_tokens ?? null,
-    queue: event.queue ?? [],
-    running_thread_id: event.running_thread_id ?? null,
+    staged_count: event.staged_count ?? 0,
+    batch:
+      batch === null
+        ? null
+        : {
+            id: batch.id,
+            thread_ids: batch.thread_ids ?? [],
+            answered_ids: batch.answered_ids ?? [],
+            state: batch.state ?? "running",
+          },
+    partial: partial === null ? null : { thread_id: partial.thread_id, text: partial.text ?? "" },
     warmup: event.warmup ?? { status: "none", thread_id: null },
   };
 }
 
-/** Apply an agent status, as GET /agent or an agent_status event carries it. */
+/**
+ * Apply an agent status, as GET /agent or an agent_status event carries it. A new batch
+ * clears the old errors of the threads it carries, and every thread it lists stops
+ * counting as sent but unlisted. When a batch ends (done, stopped, or error), the partial
+ * answers of its threads are dropped: a stopped answer that never finished does not stay
+ * on screen. The status's `partial` fills in the answer text for a thread still being
+ * answered, unless the stream already holds more text than it.
+ */
 export function withStatus(live: AgentLive, status: AgentStatus): AgentLive {
-  const active = new Set(status.queue);
-  if (status.running_thread_id !== null) active.add(status.running_thread_id);
-  let { errors, sent } = live;
-  for (const id of active) {
-    errors = without(errors, id);
-    sent = without(sent, id);
+  let { errors, sent, streams } = live;
+  const previous = live.status?.batch ?? null;
+  if (previous !== null && batchActive(live.status) && !batchActive(status)) {
+    for (const id of previous.thread_ids) streams = without(streams, id);
   }
-  return { ...live, status, errors, sent };
+  const batch = status.batch;
+  if (batch !== null) {
+    const isNew = previous?.id !== batch.id;
+    for (const id of batch.thread_ids) {
+      sent = without(sent, id);
+      if (isNew) errors = without(errors, id);
+    }
+  }
+  const partial = status.partial;
+  if (
+    partial !== null &&
+    (awaitingAnswer(status, partial.thread_id) || warmingUp(status, partial.thread_id)) &&
+    partial.text.length >= (streams[partial.thread_id] ?? "").length
+  ) {
+    streams = { ...streams, [partial.thread_id]: partial.text };
+  }
+  return { ...live, status, errors, sent, streams };
 }
 
-/** Record that a question or follow-up for `threadId` was sent, clearing its old error. */
-export const markSent = (live: AgentLive, threadId: string): AgentLive => ({
-  ...live,
-  errors: without(live.errors, threadId),
-  sent: { ...live.sent, [threadId]: true },
-});
+/** Record that the threads were sent to the agent, clearing their old errors. */
+export function markSent(live: AgentLive, threadIds: readonly string[]): AgentLive {
+  let { errors } = live;
+  const sent = { ...live.sent };
+  for (const id of threadIds) {
+    errors = without(errors, id);
+    sent[id] = true;
+  }
+  return { ...live, errors, sent };
+}
 
 export function applyAgentEvent(live: AgentLive, event: ReviewEvent): AgentLive {
   switch (event.type) {
@@ -74,13 +132,13 @@ export function applyAgentEvent(live: AgentLive, event: ReviewEvent): AgentLive 
           ...live.streams,
           [event.thread_id]: (live.streams[event.thread_id] ?? "") + event.text,
         },
-        errors: without(live.errors, event.thread_id),
         sent: without(live.sent, event.thread_id),
       };
     case "agent_message":
       return {
         ...live,
         streams: without(live.streams, event.thread_id),
+        errors: without(live.errors, event.thread_id),
         sent: without(live.sent, event.thread_id),
       };
     case "agent_error":
@@ -97,8 +155,8 @@ export function applyAgentEvent(live: AgentLive, event: ReviewEvent): AgentLive 
 
 /**
  * Put an agent message into its thread: a message with a known id replaces it (the
- * overview's first message is filled in this way), any other is appended. Returns null
- * when the thread is not in the list.
+ * overview's first message is filled in this way), any other is appended. The thread's
+ * `agent_error` clears. Returns null when the thread is not in the list.
  */
 export function applyAgentMessage(
   threads: readonly ReviewThread[],
@@ -112,6 +170,7 @@ export function applyAgentMessage(
     const known = thread.messages.some((m) => m.id === message.id);
     return {
       ...thread,
+      agent_error: null,
       messages: known
         ? thread.messages.map((m) => (m.id === message.id ? message : m))
         : [...thread.messages, message],
@@ -128,51 +187,139 @@ export const isOverview = (thread: ReviewThread, status: AgentStatus | null) =>
   thread.line === 0 &&
   (thread.created_by === "agent" || status?.warmup.thread_id === thread.id);
 
-export type QuestionState =
-  | { kind: "running" }
-  | { kind: "queued"; ahead: number }
-  | { kind: "sent" }
-  | { kind: "error"; error: string }
-  | { kind: "answered" }
-  | { kind: "waiting" };
+export const isStaged = (message: ThreadMessage) => message.status === "staged";
 
-/** The turns before `threadId`: the running one, then the queue ahead of it. */
-export function turnsAhead(status: AgentStatus, threadId: string): number | null {
-  const index = status.queue.indexOf(threadId);
-  if (index === -1) return null;
-  return index + (status.running_thread_id !== null ? 1 : 0);
+export const stagedMessages = (thread: ReviewThread) => thread.messages.filter(isStaged);
+
+/**
+ * The question threads with something staged. One thread counts once, however many staged
+ * messages it holds, as one batch answers each thread once.
+ */
+export const stagedThreadIds = (threads: readonly ReviewThread[]): string[] =>
+  threads.filter((t) => isQuestion(t) && stagedMessages(t).length > 0).map((t) => t.id);
+
+/** A staged message whose edit and delete act on the whole thread: the unsent first question. */
+export const ownsThread = (thread: ReviewThread, message: ThreadMessage) =>
+  isStaged(message) && thread.messages[0]?.id === message.id;
+
+const mapThread = (
+  threads: readonly ReviewThread[],
+  threadId: string,
+  change: (thread: ReviewThread) => ReviewThread,
+): readonly ReviewThread[] => threads.map((t) => (t.id === threadId ? change(t) : t));
+
+/** The threads after a send: their staged messages count as sent and their old error clears. */
+export function markThreadsSent(
+  threads: readonly ReviewThread[],
+  threadIds: readonly string[],
+): readonly ReviewThread[] {
+  const ids = new Set(threadIds);
+  return threads.map((thread) =>
+    ids.has(thread.id)
+      ? {
+          ...thread,
+          agent_error: null,
+          messages: thread.messages.map((m) =>
+            isStaged(m) ? { ...m, status: "sent" as const } : m,
+          ),
+        }
+      : thread,
+  );
 }
 
-export const queueLabel = (ahead: number) =>
-  ahead === 0 ? "queued: next" : `queued: ${ahead} ahead`;
+/** Append a staged follow-up to a question thread. */
+export const addStagedMessage = (
+  threads: readonly ReviewThread[],
+  threadId: string,
+  message: ThreadMessage,
+) => mapThread(threads, threadId, (t) => ({ ...t, messages: [...t.messages, message] }));
 
+/** Replace the body of one message. */
+export const editMessageBody = (
+  threads: readonly ReviewThread[],
+  threadId: string,
+  messageId: string,
+  body: string,
+) =>
+  mapThread(threads, threadId, (t) => ({
+    ...t,
+    messages: t.messages.map((m) => (m.id === messageId ? { ...m, body } : m)),
+  }));
+
+/** Drop one message from its thread. */
+export const removeMessage = (
+  threads: readonly ReviewThread[],
+  threadId: string,
+  messageId: string,
+) =>
+  mapThread(threads, threadId, (t) => ({
+    ...t,
+    messages: t.messages.filter((m) => m.id !== messageId),
+  }));
+
+export type QuestionState =
+  | { kind: "streaming" }
+  | { kind: "waiting" }
+  | { kind: "staged"; error: string | null }
+  | { kind: "error"; error: string }
+  | { kind: "answered" }
+  | { kind: "unanswered" };
+
+export interface BatchProgress {
+  total: number;
+  answered: number;
+  /** True while the batch waits behind another job, such as the warm-up. */
+  queued: boolean;
+}
+
+/** How far the batch out with the agent has got; null when none is out. */
+export function batchProgress(status: AgentStatus | null): BatchProgress | null {
+  const batch = status?.batch ?? null;
+  if (batch === null || !batchActive(status)) return null;
+  const listed = new Set(batch.thread_ids);
+  const answered = batch.answered_ids.filter((id) => listed.has(id)).length;
+  return { total: listed.size, answered, queued: batch.state === "queued" };
+}
+
+export const batchProgressLabel = (progress: BatchProgress) =>
+  progress.queued
+    ? `Queued: ${progress.total} question${progress.total === 1 ? "" : "s"}`
+    : `Answered ${progress.answered} of ${progress.total}`;
+
+/**
+ * Where a question stands. Streaming text wins. A thread the batch out with the agent has
+ * not answered yet waits for the agent, as does one just sent, unless this tab saw the
+ * agent skip it. A skipped thread goes back to staged and keeps the reason: the
+ * agent_error event in this tab, or the thread's `agent_error` after a reload.
+ */
 export function questionState(thread: ReviewThread, live: AgentLive): QuestionState {
-  const status = live.status;
-  if (status !== null && status.running_thread_id === thread.id) return { kind: "running" };
-  const ahead = status === null ? null : turnsAhead(status, thread.id);
-  if (ahead !== null) return { kind: "queued", ahead };
-  const error = live.errors[thread.id];
-  if (error !== undefined) return { kind: "error", error };
+  if (live.streams[thread.id] !== undefined) return { kind: "streaming" };
+  const skipped = live.errors[thread.id];
+  if (skipped === undefined && (awaitingAnswer(live.status, thread.id) || live.sent[thread.id])) {
+    return { kind: "waiting" };
+  }
+  const error = skipped ?? thread.agent_error ?? null;
+  if (stagedMessages(thread).length > 0) return { kind: "staged", error };
+  if (error !== null) return { kind: "error", error };
   const last = thread.messages.at(-1);
   if (last?.author === "agent" && last.body.trim() !== "") return { kind: "answered" };
-  if (live.sent[thread.id]) return { kind: "sent" };
-  return { kind: "waiting" };
+  return { kind: "unanswered" };
 }
 
 export function questionStateLabel(state: QuestionState): string {
   switch (state.kind) {
-    case "running":
+    case "streaming":
       return "answering";
-    case "queued":
-      return queueLabel(state.ahead);
-    case "sent":
-      return "sent";
+    case "waiting":
+      return "waiting for the agent";
+    case "staged":
+      return state.error === null ? "staged" : "skipped, staged again";
     case "error":
       return "error";
     case "answered":
       return "answered";
-    case "waiting":
-      return "no answer yet";
+    case "unanswered":
+      return "no answer";
   }
 }
 

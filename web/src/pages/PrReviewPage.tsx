@@ -1,5 +1,6 @@
 import type { SelectedLineRange } from "@pierre/diffs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AgentBar } from "../components/AgentBar";
 import { AgentPanel } from "../components/AgentPanel";
 import { ChecksSummary } from "../components/ChecksSummary";
 import { CopyButton } from "../components/CopyButton";
@@ -22,13 +23,20 @@ import { StackBar } from "../components/StackBar";
 import { errorMessage } from "../components/Thread";
 import {
   EMPTY_LIVE,
+  addStagedMessage,
   applyAgentEvent,
   applyAgentMessage,
+  batchActive,
   composerAnchor,
   composerFor,
+  editMessageBody,
   isOverview,
   markSent,
+  markThreadsSent,
+  ownsThread,
   questionThreads,
+  removeMessage,
+  stagedThreadIds,
   statusFrom,
   withStatus,
   type AgentLive,
@@ -77,6 +85,7 @@ import type {
   ReviewThread,
   StackPr,
   SubmitReviewResult,
+  ThreadMessage,
 } from "../lib/types";
 
 const HINT_MS = 5000;
@@ -271,12 +280,12 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
       void loadThreads();
       void loadStack();
       void loadAgent();
-    } else if (
-      event.type === "agent_status" ||
-      event.type === "agent_delta" ||
-      event.type === "agent_error"
-    ) {
+    } else if (event.type === "agent_status" || event.type === "agent_delta") {
       setLive((current) => applyAgentEvent(current, event));
+    } else if (event.type === "agent_error") {
+      setLive((current) => applyAgentEvent(current, event));
+      // A skipped question goes back to staged on the daemon; fetch its messages again.
+      void loadThreads();
     } else if (event.type === "agent_message") {
       setLive((current) => applyAgentEvent(current, event));
       if (threadsByIdRef.current.has(event.thread_id)) {
@@ -412,22 +421,34 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
   const agentOn = live.status !== null && live.status.state !== "off";
 
   const commentActions = useMemo<PrCommentActions>(() => {
-    const reply = async (threadId: string, body: string) => {
+    const sendThreads = async (threadIds?: readonly string[]) => {
+      const result = await api.sendToAgent(reviewId, threadIds);
+      setLive((current) => markSent(current, result.thread_ids));
+      setThreads((current) => markThreadsSent(current, result.thread_ids));
+    };
+    // "Ask now" stages first, so a failed send leaves a staged question, not a lost one.
+    const sendStagedNow = async (threadId: string) => {
+      try {
+        await sendThreads([threadId]);
+      } catch (e) {
+        showHint(`The question is staged. Sending it failed: ${errorMessage(e)}`);
+      }
+    };
+    const reply = async (threadId: string, body: string, now: boolean) => {
       const result = await api.reply(threadId, body);
-      setLive((current) => markSent(current, threadId));
-      const message = {
+      const message: ThreadMessage = {
         id: result.id,
-        author: "user" as const,
+        author: "user",
         body,
         created_at: new Date().toISOString(),
+        status: "staged",
       };
       setThreads((current) =>
-        current.map((t) =>
-          t.id === threadId && !t.messages.some((m) => m.id === result.id)
-            ? { ...t, messages: [...t.messages, message] }
-            : t,
-        ),
+        current.some((t) => t.id === threadId && t.messages.some((m) => m.id === result.id))
+          ? current
+          : addStagedMessage(current, threadId, message),
       );
+      if (now) await sendStagedNow(threadId);
     };
     return {
       openComposer(next) {
@@ -454,27 +475,41 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
           current !== null && sameAnchor(composerAnchor(current), anchor) ? null : current,
         );
       },
-      async askQuestion(anchor, body) {
+      async askQuestion(anchor, body, now) {
         const thread = await api.createReviewThread(reviewId, { kind: "question", ...anchor, body });
         setThreads((current) => upsert(current, thread));
-        setLive((current) => markSent(current, thread.id));
         setComposer((current) =>
           current !== null && sameAnchor(composerAnchor(current), anchor) ? null : current,
         );
+        if (now) await sendStagedNow(thread.id);
       },
       reply,
-      async stop(threadId) {
+      async editStaged(thread, message, body) {
+        if (ownsThread(thread, message)) {
+          const updated = await api.editReviewThread(thread.id, body);
+          setThreads((current) => upsert(current, updated));
+          return;
+        }
+        await api.editMessage(message.id, body);
+        setThreads((current) => editMessageBody(current, thread.id, message.id, body));
+      },
+      async deleteStaged(thread, message) {
+        if (ownsThread(thread, message)) {
+          await api.deleteReviewThread(thread.id);
+          setThreads((current) => current.filter((t) => t.id !== thread.id));
+          return;
+        }
+        await api.deleteMessage(message.id);
+        setThreads((current) => removeMessage(current, thread.id, message.id));
+      },
+      send: sendThreads,
+      async stopBatch() {
         try {
-          await api.stopThread(threadId);
+          await api.stopAgent(reviewId);
         } catch (e) {
-          if (e instanceof ApiError && e.status === 409) showHint("The answer already finished.");
+          if (e instanceof ApiError && e.status === 409) showHint("The agent already finished.");
           else throw e;
         }
-      },
-      async retry(thread) {
-        const last = thread.messages.findLast((m) => m.author === "user");
-        if (last === undefined) throw new Error("This thread has no question to send again.");
-        await reply(thread.id, last.body);
       },
       async editComment(threadId, body) {
         const thread = await api.editReviewThread(threadId, body);
@@ -592,9 +627,23 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
     setLive((current) => withStatus(current, statusFrom(status)));
   }, [reviewId]);
   const askAboutPr = useCallback(
-    (body: string) => commentActions.askQuestion(PR_ANCHOR, body),
+    (body: string, now: boolean) => commentActions.askQuestion(PR_ANCHOR, body, now),
     [commentActions],
   );
+  const stagedCount = useMemo(() => stagedThreadIds(threads).length, [threads]);
+  const agentBusy = batchActive(live.status);
+  const wasAgentBusy = useRef(agentBusy);
+  useEffect(() => {
+    // When a batch ends, its unanswered questions are staged again on the daemon.
+    if (wasAgentBusy.current && !agentBusy) void loadThreads();
+    wasAgentBusy.current = agentBusy;
+  }, [agentBusy, loadThreads]);
+  const showAgentBar =
+    live.status !== null && (agentOn || stagedCount > 0 || agentBusy);
+  const showQuestions = useCallback(() => {
+    setPanelTab("questions");
+    setPanelOpen(true);
+  }, []);
   const counts = useMemo(
     () =>
       new Map<string, ChangeCounts>(
@@ -709,7 +758,11 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
     <PrCommentActionsContext.Provider value={commentActions}>
     <PrCommentStateContext.Provider value={commentState}>
     <AgentLiveContext.Provider value={live}>
-    <div className={commenting ? "pr-page with-review-bar" : "pr-page"}>
+    <div
+      className={
+        commenting ? `pr-page with-review-bar${showAgentBar ? " with-agent-bar" : ""}` : "pr-page"
+      }
+    >
       <header className="topbar">
         <button
           type="button"
@@ -938,14 +991,19 @@ export function PrReviewPage({ reviewId }: { reviewId: string }) {
         />
       )}
       {pr && commenting && (
-        <PrReviewBar
-          pr={pr}
-          drafts={draftThreads}
-          stale={staleThreads}
-          onJumpToThread={jumpToThread}
-          onSubmitted={onSubmitted}
-          onStale={onStale}
-        />
+        <div className="pr-footer">
+          {showAgentBar && (
+            <AgentBar staged={stagedCount} onShowQuestions={showQuestions} />
+          )}
+          <PrReviewBar
+            pr={pr}
+            drafts={draftThreads}
+            stale={staleThreads}
+            onJumpToThread={jumpToThread}
+            onSubmitted={onSubmitted}
+            onStale={onStale}
+          />
+        </div>
       )}
     </div>
     </AgentLiveContext.Provider>

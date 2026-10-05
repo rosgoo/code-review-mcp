@@ -2,7 +2,13 @@ import type { SelectedLineRange } from "@pierre/diffs";
 import { createContext, useContext } from "react";
 import { EMPTY_LIVE, type AgentLive, type Composer } from "../lib/agent";
 import type { Citation } from "../lib/citations";
-import type { Commentable, ComposerMode, ReviewAnchor, ReviewThread } from "../lib/types";
+import type {
+  Commentable,
+  ComposerMode,
+  ReviewAnchor,
+  ReviewThread,
+  ThreadMessage,
+} from "../lib/types";
 import type { CitationHandler } from "./Markdown";
 
 export interface PrCommentActions {
@@ -10,12 +16,15 @@ export interface PrCommentActions {
   /** Switch the open composer, and the mode the next one starts in. */
   setComposerMode(mode: ComposerMode): void;
   addComment(anchor: ReviewAnchor, body: string): Promise<void>;
-  askQuestion(anchor: ReviewAnchor, body: string): Promise<void>;
-  /** A follow-up on a question thread: the agent answers it in a new turn. */
-  reply(threadId: string, body: string): Promise<void>;
-  stop(threadId: string): Promise<void>;
-  /** Send the thread's last question again. */
-  retry(thread: ReviewThread): Promise<void>;
+  /** Stage a question for the next send, or with `now` send it alone at once. */
+  askQuestion(anchor: ReviewAnchor, body: string, now: boolean): Promise<void>;
+  /** Stage a follow-up on a question thread, or with `now` send the thread at once. */
+  reply(threadId: string, body: string, now: boolean): Promise<void>;
+  editStaged(thread: ReviewThread, message: ThreadMessage, body: string): Promise<void>;
+  deleteStaged(thread: ReviewThread, message: ThreadMessage): Promise<void>;
+  /** Send the staged questions to the agent as one batch: all of them, or the given threads. */
+  send(threadIds?: readonly string[]): Promise<void>;
+  stopBatch(): Promise<void>;
   editComment(threadId: string, body: string): Promise<void>;
   deleteComment(threadId: string): Promise<void>;
   startReanchor(threadId: string | null): void;

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { formatCost, formatTokens } from "../lib/agent";
+import { batchProgress, batchProgressLabel, formatCost, formatTokens } from "../lib/agent";
 import type { AgentState, ReviewThread } from "../lib/types";
 import { Markdown } from "./Markdown";
 import { useAgentLive, usePrCommentState } from "./PrCommentContext";
@@ -28,7 +28,8 @@ function Overview({
   const warmup = live.status?.warmup.status ?? "none";
   const body = overview?.messages[0]?.body.trim() ?? "";
   const stream = overview === null ? undefined : live.streams[overview.id];
-  const failure = overview === null ? undefined : live.errors[overview.id];
+  const failure =
+    overview === null ? undefined : (live.errors[overview.id] ?? overview.agent_error ?? undefined);
 
   async function generate() {
     setBusy(true);
@@ -110,13 +111,13 @@ export function AgentPanel({
   questions: readonly ReviewThread[];
   onToggle(): void;
   onWarmup(): Promise<void>;
-  onAsk(body: string): Promise<void>;
+  onAsk(body: string, now: boolean): Promise<void>;
 }) {
   const live = useAgentLive();
   const { agentOn } = usePrCommentState();
   const status = live.status;
   if (status === null) return null;
-  const queued = status.queue.length;
+  const progress = batchProgress(status);
   return (
     <section className={open ? "agent-panel" : "agent-panel collapsed"} aria-label="Review agent">
       <header className="agent-panel-header">
@@ -132,7 +133,7 @@ export function AgentPanel({
         <span className="agent-panel-title">Agent</span>
         <span className={`chip chip-agent-${status.state}`}>
           {STATE_LABELS[status.state]}
-          {queued > 0 && ` · ${queued} queued`}
+          {progress !== null && ` · ${batchProgressLabel(progress).toLowerCase()}`}
         </span>
         {status.model && <code className="muted agent-model">{status.model}</code>}
         <span className="spacer" />

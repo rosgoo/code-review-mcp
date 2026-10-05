@@ -146,14 +146,20 @@ export function ReviewComposerCard({ composer }: { composer: Composer }) {
       </div>
       {asking && (
         <p className="composer-note">
-          Private: only you see this. The agent answers here and posts nothing to GitHub.
+          Private: only you see this. Add it to the batch and send the batch from the agent bar,
+          or ask now. Nothing goes to GitHub.
         </p>
       )}
       <MarkdownEditor
         placeholder={asking ? "Ask the agent about this code" : "Leave a review comment for the author"}
-        submitLabel={asking ? "Ask" : "Add draft"}
+        submitLabel={asking ? "Add to batch" : "Add draft"}
         onSubmit={(body) =>
-          asking ? actions.askQuestion(anchor, body) : actions.addComment(anchor, body)
+          asking ? actions.askQuestion(anchor, body, false) : actions.addComment(anchor, body)
+        }
+        secondary={
+          asking
+            ? { label: "Ask now", onSubmit: (body) => actions.askQuestion(anchor, body, true) }
+            : undefined
         }
         onCancel={() => actions.openComposer(null)}
       />

@@ -16,6 +16,7 @@ import type {
   ReviewThread,
   SubmitReviewResult,
   ReviewView,
+  SentBatch,
 } from "./types";
 
 export class ApiError extends Error {
@@ -96,7 +97,16 @@ export const api = {
     request<unknown>(threadPath(threadId), { method: "DELETE" }),
   agentStatus: (reviewId: string) => request<AgentStatus>(`${reviewPath(reviewId)}/agent`),
   startWarmup: (reviewId: string) => post<AgentStatus>(`${reviewPath(reviewId)}/agent/warmup`),
-  stopThread: (threadId: string) => post<{ ok: boolean }>(`${threadPath(threadId)}/stop`),
+  sendToAgent: (reviewId: string, threadIds?: readonly string[]) =>
+    post<SentBatch>(
+      `${reviewPath(reviewId)}/agent/send`,
+      threadIds === undefined ? {} : { thread_ids: threadIds },
+    ),
+  stopAgent: (reviewId: string) => post<unknown>(`${reviewPath(reviewId)}/agent/stop`),
+  editMessage: (messageId: string, body: string) =>
+    send<unknown>("PATCH", `/api/messages/${encodeURIComponent(messageId)}`, { body }),
+  deleteMessage: (messageId: string) =>
+    request<unknown>(`/api/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" }),
   submitReview: (reviewId: string, event: ReviewEventName, body: string) =>
     post<SubmitReviewResult>(`${reviewPath(reviewId)}/submit-review`, { event, body }),
   closePr: (reviewId: string) => post<{ ok: boolean }>(`${reviewPath(reviewId)}/close`),
