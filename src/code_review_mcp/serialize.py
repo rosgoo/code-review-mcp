@@ -1,11 +1,27 @@
-"""Serialization helpers for models."""
+from collections.abc import Mapping, Sequence, Set
+from typing import Literal
 
-from __future__ import annotations
+from code_review_mcp.models import LineType
+from code_review_mcp.store import Author, MessageRow, ReviewFile, ReviewRow, Side, ThreadRow
 
-from code_review_mcp.models import Comment, FileView, Reply
+_REPLY_AUTHOR: dict[Author, Literal["user", "claude"]] = {"user": "user", "agent": "claude"}
 
 
-def serialize_file(f: FileView) -> dict[str, object]:
+def side_for_line_type(line_type: LineType) -> Side:
+    return "deletions" if line_type == "delete" else "additions"
+
+
+def line_type_for(thread: ThreadRow, added_lines: Mapping[str, Set[int]]) -> LineType:
+    """Derive the legacy line type: deletions are "delete"; additions are "add" only if the
+    line is an added line of the review's current diff, otherwise "context"."""
+    if thread.side == "deletions":
+        return "delete"
+    if thread.line in added_lines.get(thread.path, ()):
+        return "add"
+    return "context"
+
+
+def serialize_file(f: ReviewFile) -> dict[str, object]:
     result: dict[str, object] = {
         "path": f.path,
         "content": f.content,
@@ -20,25 +36,47 @@ def serialize_file(f: FileView) -> dict[str, object]:
     return result
 
 
-def serialize_reply(r: Reply) -> dict[str, object]:
+def serialize_reply(m: MessageRow) -> dict[str, object]:
     return {
-        "id": r.id,
-        "comment_id": r.comment_id,
-        "author": r.author,
-        "message": r.message,
-        "timestamp": r.timestamp,
+        "id": m.id,
+        "comment_id": m.thread_id,
+        "author": _REPLY_AUTHOR[m.author],
+        "message": m.body,
+        "timestamp": m.created_at,
     }
 
 
-def serialize_comment(c: Comment) -> dict[str, object]:
+def serialize_comment(
+    thread: ThreadRow,
+    messages: Sequence[MessageRow],
+    added_lines: Mapping[str, Set[int]],
+) -> dict[str, object]:
+    """Serialize a local thread in the comment shape agents and the legacy UI read.
+
+    The first message is the comment body; the rest are replies.
+    """
+    first, *replies = messages
     return {
-        "id": c.id,
-        "file_path": c.file_path,
-        "line_number": c.line_number,
-        "line_type": c.line_type,
-        "line_content": c.line_content,
-        "user_message": c.user_message,
-        "timestamp": c.timestamp,
-        "status": c.status,
-        "replies": [serialize_reply(r) for r in c.replies],
+        "id": thread.id,
+        "file_path": thread.path,
+        "line_number": thread.line,
+        "line_type": line_type_for(thread, added_lines),
+        "line_content": thread.line_content,
+        "user_message": first.body,
+        "timestamp": thread.created_at,
+        "status": thread.status,
+        "replies": [serialize_reply(r) for r in replies],
+    }
+
+
+def serialize_review_summary(review: ReviewRow, url: str) -> dict[str, object]:
+    return {
+        "id": review.id,
+        "kind": review.kind,
+        "title": review.title,
+        "status": review.status,
+        "mode": review.mode,
+        "url": url,
+        "created_at": review.created_at,
+        "updated_at": review.updated_at,
     }

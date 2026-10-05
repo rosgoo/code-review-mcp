@@ -10,14 +10,8 @@ dependencies = [
     "pydantic>=2.10.0,<3",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "ruff>=0.9.0,<1",
-    "mypy>=1.14.0,<2",
-]
-
 [project.scripts]
-code-review-mcp = "code_review_mcp:main"
+code-review-mcp = "code_review_mcp.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -38,3 +32,17 @@ python_version = "3.13"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=1.14.0,<2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.9.0,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

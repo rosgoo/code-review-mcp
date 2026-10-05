@@ -1,5 +1,3 @@
-"""Entrypoint for `python -m code_review_mcp`."""
+from code_review_mcp.cli import main
 
-from code_review_mcp import main
-
-main()
+raise SystemExit(main())

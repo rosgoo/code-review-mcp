@@ -1,11 +1,16 @@
 // Client-side state store
 
+export let reviewId = null;
 export let currentMode = "empty"; // "diff", "files", "empty"
 export let diffData = { diff: "", title: "" };
 export let filesData = { files: [], title: "" };
 export let comments = [];
 export let viewMode = "line-by-line"; // or "side-by-side"
 let nextLocalId = 1;
+
+export function setReviewId(id) {
+  reviewId = id;
+}
 
 export function setMode(mode) {
   currentMode = mode;

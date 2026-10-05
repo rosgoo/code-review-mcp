@@ -1,13 +1,13 @@
 // SSE connection and event handling
 
-import { comments, findCommentByServerId, currentMode } from './state.js';
+import { comments, findCommentByServerId, currentMode, reviewId } from './state.js';
 import { renderInlineThreads } from './diff.js';
 import { renderFileInlineThreads } from './files.js';
 import { renderCommentSidebar } from './comments.js';
 import { morphButton, renderCurrentView } from './main.js';
 
 export function connectSSE() {
-  const es = new EventSource("/events");
+  const es = new EventSource(`/api/events?review=${encodeURIComponent(reviewId)}`);
   es.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === "view_updated" || msg.type === "diff_updated") {

@@ -4,8 +4,8 @@ import { renderDiff, loadExistingComments, renderInlineThreads, buildFileTree } 
 import { renderFiles, loadExistingFileComments, renderFileInlineThreads, buildFileSidebar } from './files.js';
 import { connectSSE } from './sse.js';
 import { renderCommentSidebar, updatePendingCount } from './comments.js';
-import { submitAllDrafts, postComment, fetchView } from './api.js';
-import { comments, addComment, getNextLocalId, setViewMode, currentMode, setMode } from './state.js';
+import { submitAllDrafts, postComment, fetchView, resolveReviewId } from './api.js';
+import { comments, addComment, getNextLocalId, setViewMode, currentMode, setMode, reviewId, setReviewId } from './state.js';
 import { initResizeHandles } from './resize.js';
 
 const DEFAULT_BTN_TEXT = "Submit Comments";
@@ -43,14 +43,16 @@ export async function renderCurrentView() {
     await loadExistingFileComments();
     renderFileInlineThreads();
   } else {
+    document.getElementById("review-title").textContent = data.title || "Code Review";
     document.getElementById("diff-content").textContent = "";
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "Waiting for Claude to send code...";
+    empty.textContent = data.error || "Waiting for Claude to send code...";
     document.getElementById("diff-content").appendChild(empty);
   }
 
   renderCommentSidebar();
+  return data;
 }
 
 // ── Footer ─────────────────────────────────────────────────────────────────
@@ -232,8 +234,13 @@ async function init() {
   initCommentsToggle();
   initInlineWidthTracking();
 
-  await renderCurrentView();
-  connectSSE();
+  setReviewId(await resolveReviewId());
+  if (reviewId && !new URLSearchParams(location.search).has("review")) {
+    history.replaceState(null, "", `?review=${encodeURIComponent(reviewId)}`);
+  }
+
+  const view = await renderCurrentView();
+  if (reviewId && !view.error) connectSSE();
   initFooter();
   initViewToggle();
   initResizeHandles();
