@@ -413,6 +413,13 @@ class Store:
             (status, utc_now(), thread_id),
         )
 
+    def delete_draft_thread(self, thread_id: str) -> bool:
+        """Delete the thread and its messages if its status is draft. Returns whether it did."""
+        cursor = self._conn.execute(
+            "DELETE FROM threads WHERE id = ? AND status = 'draft'", (thread_id,)
+        )
+        return cursor.rowcount > 0
+
     def move_threads(
         self,
         review_id: str,

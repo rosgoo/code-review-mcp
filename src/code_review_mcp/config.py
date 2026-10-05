@@ -27,7 +27,7 @@ class Settings:
         return f"http://{url_host}:{self.port}"
 
     def review_url(self, review_id: str) -> str:
-        return f"{self.base_url}/?review={review_id}"
+        return f"{self.base_url}/r/{review_id}"
 
 
 def load_settings(port: int | None = None, host: str | None = None) -> Settings:

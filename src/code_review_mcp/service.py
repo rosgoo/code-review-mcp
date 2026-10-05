@@ -4,7 +4,7 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
 from code_review_mcp.config import Settings
-from code_review_mcp.errors import NotFoundError, ReviewError
+from code_review_mcp.errors import ConflictError, NotFoundError, ReviewError
 from code_review_mcp.hub import ReviewHub
 from code_review_mcp.local_files import (
     added_lines_by_path,
@@ -12,12 +12,12 @@ from code_review_mcp.local_files import (
     require_absolute,
 )
 from code_review_mcp.models import CommentRequest
+from code_review_mcp.reverse_patch import reconstruct_old_content, split_file_patches
 from code_review_mcp.serialize import (
     serialize_comment,
     serialize_file,
     serialize_reply,
     serialize_review_summary,
-    side_for_line_type,
 )
 from code_review_mcp.store import (
     Author,
@@ -109,6 +109,11 @@ class ReviewService:
         self._hub.publish(review_id, "view_updated")
 
     def view(self, review_id: str) -> dict[str, object]:
+        """Return what the browser renders for the review.
+
+        An annotated review (files from a diff) also carries the diff and, per file,
+        `old_content` rebuilt from that diff, or None when the file does not match it.
+        """
         review = self.require_review(review_id)
         result: dict[str, object] = {
             "review_id": review.id,
@@ -118,7 +123,21 @@ class ReviewService:
         if review.mode == "diff":
             result["diff"] = review.patch_text or ""
         elif review.mode == "files":
-            result["files"] = [serialize_file(f) for f in self._store.list_review_files(review_id)]
+            files = self._store.list_review_files(review_id)
+            if review.patch_text is None:
+                result["files"] = [serialize_file(f) for f in files]
+            else:
+                patches = split_file_patches(review.patch_text)
+                result["diff"] = review.patch_text
+                result["files"] = [
+                    {
+                        **serialize_file(f),
+                        "old_content": reconstruct_old_content(f.content, patches[f.path])
+                        if f.path in patches
+                        else None,
+                    }
+                    for f in files
+                ]
         return result
 
     def comments(
@@ -134,18 +153,39 @@ class ReviewService:
         return self.comments(review_id, statuses=_SUBMITTED)
 
     def add_user_comment(self, review_id: str, request: CommentRequest) -> ThreadRow:
-        self._require_local_review(review_id)
-        return self._store.create_thread(
+        """Create a draft thread. A `start_side` without a `start_line` is dropped; a
+        `start_line` without a `start_side` starts on the comment's own side."""
+        review = self._require_local_review(review_id)
+        has_range = request.start_line is not None
+        thread = self._store.create_thread(
             review_id=review_id,
             kind="local",
-            path=request.file_path,
-            side=side_for_line_type(request.line_type),
-            line=request.line_number,
+            path=request.path,
+            side=request.side,
+            line=request.line,
+            start_line=request.start_line,
+            start_side=(request.start_side or request.side) if has_range else None,
             line_content=request.line_content,
             status="draft",
             author="user",
-            body=request.user_message,
+            body=request.body,
         )
+        comment = serialize_comment(
+            thread,
+            self._store.list_messages(thread.id),
+            added_lines_by_path(review.patch_text),
+        )
+        self._hub.publish(review_id, "comment_added", {"comment": comment})
+        return thread
+
+    def delete_thread(self, thread_id: str) -> None:
+        """Delete a draft thread. Raises ConflictError if the thread is no longer a draft."""
+        thread = self._require_thread(thread_id)
+        if not self._store.delete_draft_thread(thread_id):
+            raise ConflictError(
+                f"Thread {thread_id!r} is {thread.status}; only a draft can be deleted"
+            )
+        self._hub.publish(thread.review_id, "thread_deleted", {"comment_id": thread_id})
 
     def submit(self, review_id: str) -> int:
         """Move the review's draft threads to submitted and wake its waiters.
@@ -158,6 +198,7 @@ class ReviewService:
         )
         self._store.touch_review(review_id)
         self._hub.notify_submit(review_id)
+        self._hub.publish(review_id, "comments_submitted", {"count": count})
         return count
 
     async def wait_for_comments(self, review_id: str, timeout: float) -> dict[str, object]:

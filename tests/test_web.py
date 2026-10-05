@@ -1,3 +1,5 @@
+import re
+
 import httpx
 import pytest
 
@@ -6,11 +8,11 @@ from code_review_mcp.service import ReviewService
 from .conftest import SAMPLE_DIFF
 
 COMMENT = {
-    "file_path": "app.py",
-    "line_number": 2,
-    "line_type": "add",
+    "path": "app.py",
+    "side": "additions",
+    "line": 2,
     "line_content": "x = 2",
-    "user_message": "why 2?",
+    "body": "why 2?",
 }
 
 
@@ -30,7 +32,7 @@ async def test_list_reviews_newest_first(
     reviews = (await client.get("/api/reviews")).json()
 
     assert [r["id"] for r in reviews] == [newer.id, older.id]
-    assert reviews[0]["url"] == f"http://127.0.0.1:7791/?review={newer.id}"
+    assert reviews[0]["url"] == f"http://127.0.0.1:7791/r/{newer.id}"
     assert reviews[0]["kind"] == "local"
 
 
@@ -92,10 +94,17 @@ async def test_invalid_comment_is_rejected(
     client: httpx.AsyncClient, app_service: ReviewService
 ) -> None:
     review = app_service.open_diff(SAMPLE_DIFF, "Bad", "")
-    response = await client.post(
-        f"/api/reviews/{review.id}/comments", json={**COMMENT, "line_type": "sideways"}
+    bad_side = await client.post(
+        f"/api/reviews/{review.id}/comments", json={**COMMENT, "side": "sideways"}
     )
-    assert response.status_code == 422
+    legacy_shape = await client.post(
+        f"/api/reviews/{review.id}/comments",
+        json={"file_path": "app.py", "line_number": 2, "user_message": "old shape"},
+    )
+    negative_line = await client.post(
+        f"/api/reviews/{review.id}/comments", json={**COMMENT, "line": -1}
+    )
+    assert [r.status_code for r in (bad_side, legacy_shape, negative_line)] == [422, 422, 422]
 
 
 async def test_foreign_host_header_is_rejected(client: httpx.AsyncClient) -> None:
@@ -103,14 +112,41 @@ async def test_foreign_host_header_is_rejected(client: httpx.AsyncClient) -> Non
     assert response.status_code == 400
 
 
-async def test_ui_is_served(client: httpx.AsyncClient) -> None:
+async def test_ui_is_served(client: httpx.AsyncClient, app_service: ReviewService) -> None:
+    review = app_service.open_diff(SAMPLE_DIFF, "UI", "")
     index = await client.get("/")
-    script = await client.get("/static/js/api.js")
+    review_page = await client.get(f"/r/{review.id}")
+    match = re.search(r'src="(/static/assets/[^"]+\.js)"', index.text)
+    assert match is not None
+    script = await client.get(match.group(1))
 
     assert index.status_code == 200
-    assert "/static/js/main.js" in index.text
+    assert review_page.status_code == 200
+    assert review_page.text == index.text
     assert script.status_code == 200
-    assert "/api/reviews/" in script.text
+    assert "/api/reviews" in script.text
+
+
+async def test_delete_thread(client: httpx.AsyncClient, app_service: ReviewService) -> None:
+    review = app_service.open_diff(SAMPLE_DIFF, "Delete", "")
+    base = f"/api/reviews/{review.id}"
+    submitted_id = (await client.post(f"{base}/comments", json=COMMENT)).json()["id"]
+    await client.post(f"{base}/submit")
+    draft_id = (await client.post(f"{base}/comments", json=COMMENT)).json()["id"]
+
+    foreign = await client.delete(
+        f"/api/threads/{draft_id}", headers={"Origin": "http://evil.example"}
+    )
+    deleted = await client.delete(f"/api/threads/{draft_id}")
+    conflict = await client.delete(f"/api/threads/{submitted_id}")
+    missing = await client.delete(f"/api/threads/{draft_id}")
+
+    assert foreign.status_code == 403
+    assert (deleted.status_code, deleted.json()) == (200, {"deleted": True})
+    assert conflict.status_code == 409
+    assert "only a draft can be deleted" in conflict.json()["error"]
+    assert missing.status_code == 404
+    assert [c["id"] for c in (await client.get(f"{base}/comments")).json()] == [submitted_id]
 
 
 @pytest.mark.parametrize("origin", ["http://evil.example", "null", "http://127.0.0.1:9999"])

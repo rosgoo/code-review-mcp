@@ -2,13 +2,9 @@ from collections.abc import Mapping, Sequence, Set
 from typing import Literal
 
 from code_review_mcp.models import LineType
-from code_review_mcp.store import Author, MessageRow, ReviewFile, ReviewRow, Side, ThreadRow
+from code_review_mcp.store import Author, MessageRow, ReviewFile, ReviewRow, ThreadRow
 
 _REPLY_AUTHOR: dict[Author, Literal["user", "claude"]] = {"user": "user", "agent": "claude"}
-
-
-def side_for_line_type(line_type: LineType) -> Side:
-    return "deletions" if line_type == "delete" else "additions"
 
 
 def line_type_for(thread: ThreadRow, added_lines: Mapping[str, Set[int]]) -> LineType:
@@ -51,12 +47,13 @@ def serialize_comment(
     messages: Sequence[MessageRow],
     added_lines: Mapping[str, Set[int]],
 ) -> dict[str, object]:
-    """Serialize a local thread in the comment shape agents and the legacy UI read.
+    """Serialize a local thread in the comment shape that agents read.
 
-    The first message is the comment body; the rest are replies.
+    The first message is the comment body; the rest are replies. A multi-line
+    comment adds `start_line` and `start_side`.
     """
     first, *replies = messages
-    return {
+    result: dict[str, object] = {
         "id": thread.id,
         "file_path": thread.path,
         "line_number": thread.line,
@@ -67,6 +64,10 @@ def serialize_comment(
         "status": thread.status,
         "replies": [serialize_reply(r) for r in replies],
     }
+    if thread.start_line is not None:
+        result["start_line"] = thread.start_line
+        result["start_side"] = thread.start_side
+    return result
 
 
 def serialize_review_summary(review: ReviewRow, url: str) -> dict[str, object]:

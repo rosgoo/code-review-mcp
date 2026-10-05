@@ -71,7 +71,7 @@ The daemon does not run in the agent's working directory. `diff_file`, `content_
 ## The multi-round loop
 
 ```
-agent -> open_diff(...)                   ──► browser opens /?review=<id>
+agent -> open_diff(...)                   ──► browser opens /r/<id>
 agent -> wait_for_comments(review_id)     ══► [blocks here]
 you    -> leave inline comments, click Submit
 agent <- {"status":"submitted", "comments":[...]}
@@ -87,31 +87,49 @@ agent -> wait_for_comments(review_id)     ══► [blocks again for next round
 |---|---|
 | `GET /api/health` | Liveness and schema version |
 | `GET /api/reviews` | Reviews, newest first |
-| `GET /api/reviews/{id}/view` | Mode, title, diff or files |
+| `GET /api/reviews/{id}/view` | Mode, title, diff or files. An `open_diff` review with `working_dir` also returns the diff and, per file, `old_content` rebuilt from it (`null` when the file on disk no longer matches the diff) |
 | `GET /api/reviews/{id}/comments` | All comments (any status) |
-| `POST /api/reviews/{id}/comments` | Add a draft comment |
+| `POST /api/reviews/{id}/comments` | Add a draft comment: `path`, `side` (`additions` \| `deletions`), `line`, optional `start_line` / `start_side`, `line_content`, `body` |
 | `POST /api/reviews/{id}/submit` | Submit drafts; wakes `wait_for_comments` for that review |
 | `POST /api/threads/{id}/reply` | User reply; reopens a resolved thread |
+| `DELETE /api/threads/{id}` | Delete a draft thread; `409` once it is submitted |
 | `GET /api/events?review={id}` | SSE stream for one review |
 
-The UI at `/` reads `?review=<id>`. Without it, the UI loads the newest review.
+SSE event types: `view_updated`, `comment_added`, `thread_deleted`, `comments_submitted`, `reply_added`, `comment_resolved`.
+
+`/` lists the reviews. `/r/<id>` is the review page. An old `/?review=<id>` link redirects to `/r/<id>`.
 
 ## Browser UI
 
-- **File tree** on the left (toggle via the hamburger icon)
-- **Diff** in the middle, unified or split view
-- **Comments drawer** on the right, opened via the speech-bubble icon in the header
-- Click the `+` next to any line number (or click-and-drag across line numbers) to comment
-- **Cmd/Ctrl+Enter** in any textarea submits
-- **Esc** closes the comments drawer
+The UI is a React app built on [`@pierre/diffs`](https://www.npmjs.com/package/@pierre/diffs).
+
+- **File tree** on the left (toggle with ☰), with a filter box
+- **Diff** in the middle, unified or split (remembered per browser). An `open_diff` with `working_dir` shows full files, so you can expand unchanged context
+- **Markdown** files from `show_files` render by default; switch to Source to comment on lines
+- Click the `+` next to a line number, or drag across line numbers, to comment on one line or a range
+- **Comments** button opens a list of every thread; click one to jump to it
+- **Overall feedback** box and **Submit** in the bar at the bottom
+- **Cmd/Ctrl+Enter** submits a textarea; **Esc** closes a composer or the comments list
+- Light and dark themes follow the system setting
 
 ## Development
 
 ```bash
 uv sync
 uv run ruff check . && uv run ruff format --check .
-uv run mypy src
+uv run mypy src tests
 uv run pytest -q
+```
+
+The UI source is in `web/` (Vite + React + TypeScript, pnpm). `pnpm build` writes the bundle to `src/code_review_mcp/static/`. The built files are committed, so the daemon needs no Node at runtime. Rebuild and commit them after a UI change.
+
+```bash
+cd web
+pnpm install
+pnpm exec tsc --noEmit
+pnpm exec vitest run
+pnpm build      # writes ../src/code_review_mcp/static/
+pnpm dev        # dev server; proxies /api and /mcp to $CODE_REVIEW_MCP_DEV_TARGET (default http://127.0.0.1:7790)
 ```
 
 Key files in `src/code_review_mcp/`:
@@ -122,4 +140,5 @@ Key files in `src/code_review_mcp/`:
 - `service.py`: review rules shared by tools and routes
 - `store.py`: SQLite schema, migrations, typed row access
 - `hub.py`: in-memory submit wake-ups and SSE fan-out, per review
-- `static/`: the browser UI (vanilla JS, no build step)
+- `reverse_patch.py`: rebuilds a file's old content from its new content and its diff
+- `static/`: the built UI from `web/` (do not edit by hand)

@@ -12,7 +12,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from code_review_mcp.config import Settings
-from code_review_mcp.errors import NotFoundError, ReviewError
+from code_review_mcp.errors import ConflictError, NotFoundError, ReviewError
 from code_review_mcp.hub import ReviewHub
 from code_review_mcp.models import CommentRequest, ReplyRequest
 from code_review_mcp.service import ReviewService
@@ -20,6 +20,7 @@ from code_review_mcp.store import Store
 from code_review_mcp.tools import build_mcp, transport_security
 
 STATIC_DIR = Path(__file__).parent / "static"
+INDEX_HTML = STATIC_DIR / "index.html"
 SSE_KEEPALIVE_SECONDS = 30.0
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -78,6 +79,11 @@ def build_api_router(service: ReviewService, hub: ReviewHub, store: Store) -> AP
     async def submit(review_id: str) -> dict[str, object]:
         return {"submitted": service.submit(review_id)}
 
+    @router.delete("/threads/{thread_id}")
+    async def delete_thread(thread_id: str) -> dict[str, object]:
+        service.delete_thread(thread_id)
+        return {"deleted": True}
+
     @router.post("/threads/{thread_id}/reply")
     async def reply(thread_id: str, body: ReplyRequest) -> dict[str, object]:
         result = service.reply(thread_id, "user", body.message)
@@ -109,7 +115,8 @@ def build_api_router(service: ReviewService, hub: ReviewHub, store: Store) -> AP
 
 
 def create_app(settings: Settings, store: Store) -> FastAPI:
-    """Build the daemon app: REST + SSE under /api, MCP (streamable HTTP) at /mcp, the UI at /.
+    """Build the daemon app: REST + SSE under /api, MCP (streamable HTTP) at /mcp, the UI at
+    / and /r/{review_id}, and its built assets under /static.
 
     The app closes `store` when its lifespan ends.
     """
@@ -147,6 +154,10 @@ def create_app(settings: Settings, store: Store) -> FastAPI:
     async def not_found(_: Request, exc: NotFoundError) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=404)
 
+    @app.exception_handler(ConflictError)
+    async def conflict(_: Request, exc: ConflictError) -> JSONResponse:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
     @app.exception_handler(ReviewError)
     async def review_error(_: Request, exc: ReviewError) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -157,7 +168,10 @@ def create_app(settings: Settings, store: Store) -> FastAPI:
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.get("/", include_in_schema=False)
+    @app.get("/r/{review_id}", include_in_schema=False)
     async def index() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+        return FileResponse(
+            INDEX_HTML, media_type="text/html", headers={"Cache-Control": "no-cache"}
+        )
 
     return app

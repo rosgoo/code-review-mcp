@@ -8,3 +8,7 @@ class NotFoundError(ReviewError):
 
 class InvalidPathError(ReviewError):
     pass
+
+
+class ConflictError(ReviewError):
+    pass

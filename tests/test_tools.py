@@ -52,7 +52,7 @@ async def test_open_diff_wait_reply_resolve(
     async with _memory_session(app) as session:
         opened = await _call(session, "open_diff", diff_file=str(diff_file), title="Tools")
         review_id = opened["review_id"]
-        assert opened["url"] == f"http://127.0.0.1:7791/?review={review_id}"
+        assert opened["url"] == f"http://127.0.0.1:7791/r/{review_id}"
 
         waiter = asyncio.create_task(
             _call(session, "wait_for_comments", review_id=review_id, timeout_seconds=5)
@@ -60,7 +60,7 @@ async def test_open_diff_wait_reply_resolve(
         await asyncio.sleep(0.1)
         thread = service.add_user_comment(
             review_id,
-            CommentRequest(file_path="app.py", line_number=2, line_type="add", user_message="why?"),
+            CommentRequest(path="app.py", side="additions", line=2, body="why?"),
         )
         service.submit(review_id)
         waited = await asyncio.wait_for(waiter, 2)
